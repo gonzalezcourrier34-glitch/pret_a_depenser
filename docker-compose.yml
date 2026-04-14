@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: postgres_credit_api
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: credit_api
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d credit_api"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    container_name: fastapi_credit_api
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/credit_api
+      MODEL_PATH: artifacts/model.joblib
+      MODEL_VERSION: v1
+    ports:
+      - "8000:8000"
+
+volumes:
+  postgres_data:
