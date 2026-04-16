@@ -21,7 +21,7 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from dashboard_request import (
+from dashboard.dashboard_request import (
     ACTIVE_MODEL_QUERY,
     ALERTS_QUERY,
     DRIFT_METRICS_QUERY,
@@ -37,9 +37,9 @@ from dashboard_request import (
     get_client_features_query,
     get_table_preview_query,
 )
-from dashboard_systeme import render_systeme_page
-from dashboard_predictions import render_predictions_page
-from dashboard_monitoring import render_monitoring_page
+from dashboard.dashboard_systeme import render_systeme_page
+from dashboard.dashboard_predictions import render_predictions_page
+from dashboard.dashboard_monitoring import render_monitoring_page
 
 
 # =============================================================================

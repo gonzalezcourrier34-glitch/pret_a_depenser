@@ -47,7 +47,6 @@ from sqlalchemy import create_engine
 TYPE_ENTREE_DONNEES = os.getenv("TYPE_ENTREE_DONNEES", "DB").upper()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Attention au nom du fichier : vérifie bien qu'il s'appelle exactement ainsi
 FEATURES_CSV_PATH = Path("artifacts/ARTIFeatures_final.csv")
 
 # Mode debug activable par variable d'environnement
