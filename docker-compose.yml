@@ -46,7 +46,7 @@ services:
       API_KEY: ""
       FEATURES_TABLE: features_client_test_enriched
       DEFAULT_LIMIT: 200
-    command: ["uv", "run", "streamlit", "run", "app/dashboard/dashboard_streamlit.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    command: ["uv", "run", "streamlit", "run", "dashboard/dashboard_main.py", "--server.address=0.0.0.0", "--server.port=8501"]
     ports:
       - "8501:8501"
 
