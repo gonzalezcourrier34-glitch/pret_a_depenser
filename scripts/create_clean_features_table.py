@@ -1,18 +1,24 @@
 """
-Script de nettoyage et d'alimentation de la table de features client.
+Script de création de la table propre de features client.
 
-Ce module insère dans `features_client_test` les colonnes utiles issues
-de `features_client_test_raw`, selon les règles de nettoyage définies.
+Ce module crée la structure de la table `features_client_test`
+à partir de la table source `features_client_test_raw`, mais sans insérer
+les données.
 
 Objectif
 --------
-Séparer la logique de nettoyage métier de la simple création de structure.
+Séparer la création de la table cible du nettoyage métier afin de :
+- clarifier les responsabilités
+- faciliter les tests
+- rendre le pipeline plus lisible
 
 Notes
 -----
 - La source est `features_client_test_raw`.
 - La cible est `features_client_test`.
-- La table cible doit déjà exister avant d'exécuter ce script.
+- La table créée est vide.
+- Les colonnes conservées sont déterminées selon les mêmes règles
+  que le script de nettoyage.
 """
 
 import os
@@ -96,37 +102,6 @@ def get_columns(engine, table_name: str) -> list[str]:
     return [row[0] for row in rows]
 
 
-def table_exists(engine, table_name: str) -> bool:
-    """
-    Vérifie si une table existe dans le schéma public.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
-    table_name : str
-        Nom de la table.
-
-    Returns
-    -------
-    bool
-        True si la table existe, sinon False.
-    """
-    sql = text(
-        """
-        SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_schema = 'public'
-              AND table_name = :table_name
-        )
-        """
-    )
-
-    with engine.begin() as connection:
-        return bool(connection.execute(sql, {"table_name": table_name}).scalar())
-
-
 def select_columns_to_keep(columns: list[str]) -> list[str]:
     """
     Détermine les colonnes à conserver pour la table finale.
@@ -165,6 +140,7 @@ def select_columns_to_keep(columns: list[str]) -> list[str]:
 
         keep_cols.append(col)
 
+    # Si un compteur de documents existe, on retire les colonnes unitaires
     if "DOC_COUNT" in keep_cols:
         keep_cols = [c for c in keep_cols if not c.startswith("FLAG_DOCUMENT_")]
 
@@ -172,13 +148,15 @@ def select_columns_to_keep(columns: list[str]) -> list[str]:
 
 
 # =============================================================================
-# Nettoyage et insertion
+# Création de la table cible vide
 # =============================================================================
 
-def clean_features_table(engine) -> None:
+def create_clean_features_table(engine) -> None:
     """
-    Alimente `features_client_test` à partir de `features_client_test_raw`
-    en ne conservant que les colonnes utiles.
+    Crée la table cible vide `features_client_test`.
+
+    La structure est dérivée de `features_client_test_raw`,
+    mais seules les colonnes utiles sont conservées.
 
     Parameters
     ----------
@@ -188,41 +166,34 @@ def clean_features_table(engine) -> None:
     source_table = "features_client_test_raw"
     target_table = "features_client_test"
 
-    if not table_exists(engine, source_table):
-        raise ValueError(f"La table source '{source_table}' n'existe pas.")
-
-    if not table_exists(engine, target_table):
-        raise ValueError(
-            f"La table cible '{target_table}' n'existe pas. "
-            "Exécute d'abord le script de création."
-        )
-
     columns = get_columns(engine, source_table)
     keep_cols = select_columns_to_keep(columns)
 
     if not keep_cols:
-        raise ValueError("Aucune colonne conservée pour l'insertion.")
+        raise ValueError("Aucune colonne conservée pour la table cible.")
 
     select_sql = ",\n    ".join(f'"{col}"' for col in keep_cols)
-    insert_sql = f"""
-    TRUNCATE TABLE {target_table};
 
-    INSERT INTO {target_table}
+    create_sql = f"""
+    DROP TABLE IF EXISTS {target_table};
+
+    CREATE TABLE {target_table} AS
     SELECT
         {select_sql}
-    FROM {source_table};
+    FROM {source_table}
+    WHERE 1 = 0;
     """
 
-    count_sql = text(f"SELECT COUNT(*) FROM {target_table}")
+    index_sql = f"""
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_{target_table}_sk_id_curr
+    ON {target_table} ("SK_ID_CURR");
+    """
 
     with engine.begin() as connection:
-        connection.execute(text(insert_sql))
-        row_count = connection.execute(count_sql).scalar()
+        connection.execute(text(create_sql))
+        connection.execute(text(index_sql))
 
-    print(f"Table '{target_table}' alimentée avec succès.")
-    print(f"Colonnes conservées : {len(keep_cols)}")
-    print(f"Lignes insérées     : {row_count}")
-    print(f"Colonnes supprimées : {len(columns) - len(keep_cols)}")
+    print(f"Table '{target_table}' créée vide avec {len(keep_cols)} colonnes.")
 
 
 # =============================================================================
@@ -237,9 +208,9 @@ def main() -> None:
     engine = create_engine(DATABASE_URL, echo=False)
     print("Connexion établie.")
 
-    clean_features_table(engine)
+    create_clean_features_table(engine)
 
-    print("Nettoyage et alimentation terminés.")
+    print("Création de la table cible terminée.")
 
 
 if __name__ == "__main__":

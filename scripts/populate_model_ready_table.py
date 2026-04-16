@@ -1,30 +1,40 @@
 """
-Script de vérification des features du modèle.
+Script de remplissage de la table finale compatible modèle.
 
-Ce module compare les colonnes disponibles dans la table
-`features_client_test` avec la liste exacte des features attendues
-par le modèle entraîné.
+Ce module alimente `features_client_test_model` à partir de
+`features_client_test_enriched`, en sélectionnant exactement
+les colonnes attendues par le modèle, dans le bon ordre.
 
 Objectif
 --------
-Identifier :
-- les features manquantes
-- les features supplémentaires
-- les différences de cardinalité
+Séparer la création de la structure du remplissage des données afin de :
+- faciliter le débogage
+- isoler les erreurs de colonnes manquantes
+- rendre le pipeline plus lisible
 
 Notes
 -----
-- Ce script ne modifie rien dans la base.
-- Il sert uniquement à diagnostiquer l'alignement entre la table SQL
-  et le modèle.
+- La table source est `features_client_test_enriched`.
+- La table cible `features_client_test_model` doit déjà exister.
+- Ce script vérifie que toutes les colonnes attendues sont présentes.
 """
 
 import os
+
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 
+# =============================================================================
+# Chargement des variables d'environnement
+# =============================================================================
+
 load_dotenv()
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -32,7 +42,12 @@ if not DATABASE_URL:
     raise ValueError("DATABASE_URL n'est pas défini dans les variables d'environnement")
 
 
+# =============================================================================
+# Liste exacte des features du modèle
+# =============================================================================
+
 MODEL_FEATURES = """
+SK_ID_CURR,
 NAME_CONTRACT_TYPE,
 CODE_GENDER,
 FLAG_OWN_CAR,
@@ -236,11 +251,64 @@ EXT_POW2__EXT_SOURCE_3
 """
 
 
-def parse_features(features_text: str) -> list[str]:
-    return [x.strip() for x in features_text.split(",") if x.strip()]
+# =============================================================================
+# Fonctions utilitaires
+# =============================================================================
+
+def parse_features(features_str: str) -> list[str]:
+    """
+    Convertit la chaîne de features en liste Python propre.
+
+    Parameters
+    ----------
+    features_str : str
+        Chaîne contenant les noms de colonnes séparés par des virgules.
+
+    Returns
+    -------
+    list[str]
+        Liste nettoyée des colonnes.
+    """
+    return [feature.strip() for feature in features_str.split(",") if feature.strip()]
 
 
-def get_table_columns(engine, table_name: str) -> list[str]:
+def table_exists(engine, table_name: str) -> bool:
+    """
+    Vérifie si une table existe dans le schéma public.
+    """
+    sql = text(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = :table_name
+        )
+        """
+    )
+
+    with engine.begin() as connection:
+        return bool(connection.execute(sql, {"table_name": table_name}).scalar())
+
+
+def get_missing_columns(engine, table_name: str, expected_columns: list[str]) -> list[str]:
+    """
+    Retourne les colonnes attendues mais absentes dans une table.
+
+    Parameters
+    ----------
+    engine :
+        Moteur SQLAlchemy connecté à PostgreSQL.
+    table_name : str
+        Nom de la table source.
+    expected_columns : list[str]
+        Colonnes attendues.
+
+    Returns
+    -------
+    list[str]
+        Colonnes manquantes.
+    """
     sql = text(
         """
         SELECT column_name
@@ -254,38 +322,101 @@ def get_table_columns(engine, table_name: str) -> list[str]:
     with engine.begin() as connection:
         rows = connection.execute(sql, {"table_name": table_name}).fetchall()
 
-    return [row[0] for row in rows]
+    existing_columns = {row[0] for row in rows}
+    return [col for col in expected_columns if col not in existing_columns]
 
+
+# =============================================================================
+# SQL de remplissage
+# =============================================================================
+
+TRUNCATE_MODEL_READY_TABLE_SQL = """
+TRUNCATE TABLE features_client_test_model;
+"""
+
+COUNT_ROWS_SQL = """
+SELECT COUNT(*) FROM features_client_test_model;
+"""
+
+
+# =============================================================================
+# Fonction principale de remplissage
+# =============================================================================
+
+def populate_model_ready_table(engine) -> None:
+    """
+    Remplit `features_client_test_model` à partir de
+    `features_client_test_enriched`.
+
+    Parameters
+    ----------
+    engine :
+        Moteur SQLAlchemy connecté à PostgreSQL.
+
+    Raises
+    ------
+    ValueError
+        Si la table source ou la table cible n'existent pas,
+        ou si des colonnes attendues sont absentes.
+    """
+    source_table = "features_client_test_enriched"
+    target_table = "features_client_test_model"
+
+    if not table_exists(engine, source_table):
+        raise ValueError(
+            f"La table source '{source_table}' n'existe pas."
+        )
+
+    if not table_exists(engine, target_table):
+        raise ValueError(
+            f"La table cible '{target_table}' n'existe pas. "
+            "Exécute d'abord le script de création."
+        )
+
+    features = parse_features(MODEL_FEATURES)
+
+    missing_columns = get_missing_columns(engine, source_table, features)
+    if missing_columns:
+        raise ValueError(
+            "Certaines colonnes attendues par le modèle sont absentes de la table source : "
+            f"{missing_columns[:20]}"
+            + (f" ... et {len(missing_columns) - 20} autres." if len(missing_columns) > 20 else "")
+        )
+
+    select_sql = ",\n    ".join(f'"{col}"' for col in features)
+
+    insert_sql = f"""
+    INSERT INTO {target_table}
+    SELECT
+        {select_sql}
+    FROM {source_table};
+    """
+
+    with engine.begin() as connection:
+        connection.execute(text(TRUNCATE_MODEL_READY_TABLE_SQL))
+        connection.execute(text(insert_sql))
+        row_count = connection.execute(text(COUNT_ROWS_SQL)).scalar()
+
+    print(f"Table '{target_table}' remplie avec succès.")
+    print(f"Lignes insérées : {row_count}")
+    print(f"Colonnes sélectionnées : {len(features)}")
+
+
+# =============================================================================
+# Point d'entrée
+# =============================================================================
 
 def main() -> None:
+    """
+    Point d'entrée du script.
+    """
     print("Connexion à PostgreSQL...")
     engine = create_engine(DATABASE_URL, echo=False)
     print("Connexion établie.")
 
-    model_features = parse_features(MODEL_FEATURES)
-    sql_features = get_table_columns(engine, "features_client_test_enriched")
+    populate_model_ready_table(engine)
 
-    # Normalisation en minuscules
-    model_features_lower = [f.lower() for f in model_features]
-    sql_features_lower = [f.lower() for f in sql_features]
-
-    missing_features = sorted(set(model_features_lower) - set(sql_features_lower))
-    extra_features = sorted(set(sql_features_lower) - set(model_features_lower))
-
-    print(f"\nNombre de features attendues par le modèle : {len(model_features)}")
-    print(f"Nombre de colonnes présentes dans features_client_test_enriched : {len(sql_features)}")
-    print(f"Features manquantes : {len(missing_features)}")
-    print(f"Features en trop : {len(extra_features)}")
-
-    if missing_features:
-        print("\n=== FEATURES MANQUANTES ===")
-        for col in missing_features:
-            print(col)
-
-    if extra_features:
-        print("\n=== FEATURES EN TROP ===")
-        for col in extra_features:
-            print(col)
+    print("Remplissage de la table model ready terminé.")
 
 
 if __name__ == "__main__":

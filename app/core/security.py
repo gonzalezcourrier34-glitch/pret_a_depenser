@@ -8,13 +8,14 @@ Le mécanisme retenu ici repose sur une clé API transmise dans les headers
 de la requête. Cette solution est simple à mettre en place, lisible
 et adaptée à un projet de déploiement de modèle en environnement contrôlé.
 """
-
 from fastapi import Header, HTTPException, status
 
-from app.config import API_TOKEN
+from app.core.config import API_KEY
 
 
-def verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
+def verify_api_key(
+    x_api_key: str | None = Header(default=None, alias="X-API-Key")
+) -> None:
     """
     Vérifie la validité de la clé API envoyée dans le header.
 
@@ -36,23 +37,20 @@ def verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
         Retourne une erreur 401 si la clé est absente ou invalide.
     """
 
-    # Vérifie qu'une clé API de référence est bien configurée côté serveur
-    if not API_TOKEN:
+    if not API_KEY:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="La clé API du serveur n'est pas configurée."
+            detail="La clé API du serveur n'est pas configurée.",
         )
 
-    # Vérifie que le client a bien envoyé une clé
     if x_api_key is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Clé API manquante."
+            detail="Clé API manquante.",
         )
 
-    # Compare la clé reçue avec celle attendue
-    if x_api_key != API_TOKEN:
+    if x_api_key != API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Clé API invalide."
+            detail="Clé API invalide.",
         )

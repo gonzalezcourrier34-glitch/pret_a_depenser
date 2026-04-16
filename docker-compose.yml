@@ -31,5 +31,24 @@ services:
     ports:
       - "8000:8000"
 
+  dashboard:
+    build: .
+    container_name: streamlit_credit_dashboard
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/credit_api
+      API_URL: http://api:8000
+      API_KEY: ""
+      FEATURES_TABLE: features_client_test_enriched
+      DEFAULT_LIMIT: 200
+    command: ["uv", "run", "streamlit", "run", "app/dashboard/dashboard_streamlit.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    ports:
+      - "8501:8501"
+
 volumes:
   postgres_data:

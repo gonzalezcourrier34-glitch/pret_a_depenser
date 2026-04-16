@@ -1,5 +1,5 @@
 """
-Routes FastAPI liées à la prédiction et au monitoring applicatif.
+Routes FastAPI liées à la prédiction.
 
 Ce module expose les endpoints principaux de l'API de scoring crédit.
 Il gère :
@@ -17,123 +17,69 @@ Endpoints
 - POST /predict
     Réalise une prédiction à partir des variables d'entrée, puis
     enregistre le résultat dans la base de données.
-
-Dépendances
------------
-- app.config : configuration globale (clé API, version modèle)
-- app.db : session SQLAlchemy
-- app.schemas : schémas Pydantic d'entrée et de sortie
-- app.services.predictor : logique de prédiction
-- app.crud : journalisation des prédictions en base
-
-Notes
------
-- La clé API est transmise via le header HTTP `X-API-Key`.
-- La latence d'inférence est mesurée en millisecondes.
-- Chaque prédiction est stockée pour permettre l'auditabilité
-  et le monitoring du modèle.
 """
 
-import time
+from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+import time
+import uuid
+
+import pandas as pd
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.config import API_KEY, MODEL_VERSION
-from app.crud import create_prediction_log
-from app.db import get_db
-from app.schemas import PredictRequest, PredictResponse
+from app.core.db import get_db
+from app.core.schemas import HealthResponse, PredictRequest, PredictResponse
+from app.core.security import verify_api_key
+from app.core.config import MODEL_NAME, MODEL_VERSION
+from app.crud.prediction import LoggingService
+from app.services.model_loader import get_model, get_threshold
 from app.services.predictor import make_prediction
 
 
-# =============================================================================
 # Initialisation du routeur FastAPI
-# =============================================================================
-
-# Le préfixe et les tags facilitent l'organisation de la documentation Swagger
-# et rendent l'API plus lisible.
 router = APIRouter(
     prefix="",
     tags=["Prediction"],
 )
 
 
-# =============================================================================
-# Sécurité : vérification de la clé API
-# =============================================================================
-
-def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> str:
+# Endpoint de santé
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    summary="Vérifier l'état de santé de l'API",
+)
+def health(db: Session = Depends(get_db)) -> HealthResponse:
     """
-    Vérifie la validité de la clé API transmise dans les headers HTTP.
+    Vérifie que l'API, la base et le modèle sont accessibles.
 
     Parameters
     ----------
-    x_api_key : str
-        Valeur du header `X-API-Key` envoyée par le client.
+    db : Session
+        Session SQLAlchemy injectée par FastAPI.
 
     Returns
     -------
-    str
-        La clé API validée.
-
-    Raises
-    ------
-    HTTPException
-        Levée avec un code 401 si la clé API est absente ou invalide.
-
-    Notes
-    -----
-    - Si aucune clé API n'est définie côté application, la vérification
-      peut être désactivée en pratique, mais ici on conserve un contrôle strict.
-    - Le paramètre `alias="X-API-Key"` permet de faire correspondre
-      proprement le nom du header HTTP avec le paramètre Python.
+    HealthResponse
+        Objet indiquant l'état de santé de l'application.
     """
-    if not API_KEY:
+    try:
+        db.execute(text("SELECT 1"))
+        get_model()
+        get_threshold()
+
+        return HealthResponse(status="ok")
+
+    except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="API key is not configured on the server.",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Healthcheck failed: {exc}",
         )
 
-    if x_api_key != API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API Key.",
-        )
 
-    return x_api_key
-
-
-# =============================================================================
-# Endpoint de santé
-# =============================================================================
-
-@router.get("/health", summary="Vérifier l'état de santé de l'API")
-def health() -> dict[str, str]:
-    """
-    Vérifie que l'API est accessible et opérationnelle.
-
-    Returns
-    -------
-    dict[str, str]
-        Un dictionnaire simple contenant le statut de l'application.
-
-    Examples
-    --------
-    Réponse typique :
-
-    ```json
-    {
-        "status": "ok"
-    }
-    ```
-    """
-    return {"status": "ok"}
-
-
-# =============================================================================
 # Endpoint principal de prédiction
-# =============================================================================
-
 @router.post(
     "/predict",
     response_model=PredictResponse,
@@ -142,85 +88,111 @@ def health() -> dict[str, str]:
 def predict(
     payload: PredictRequest,
     db: Session = Depends(get_db),
-    _: str = Depends(verify_api_key),
+    _: None = Depends(verify_api_key),
 ) -> PredictResponse:
     """
     Réalise une prédiction à partir des données d'entrée du client.
 
     Cet endpoint :
     1. valide les données reçues via Pydantic,
-    2. appelle le modèle de machine learning,
-    3. mesure le temps d'inférence,
-    4. journalise le résultat dans PostgreSQL,
-    5. retourne la prédiction au client.
+    2. convertit les features au format attendu par le modèle,
+    3. appelle le service de prédiction,
+    4. mesure le temps d'inférence,
+    5. journalise le résultat dans PostgreSQL,
+    6. retourne la prédiction au client.
 
     Parameters
     ----------
     payload : PredictRequest
         Corps de la requête contenant l'identifiant client optionnel
         et les variables d'entrée du modèle.
-
     db : Session
         Session SQLAlchemy injectée par FastAPI.
-
-    _ : str
-        Clé API validée par la dépendance `verify_api_key`.
-        Le nom `_` indique que cette valeur n'est pas réutilisée ensuite.
+    _ : None
+        Validation de la clé API via la dépendance `verify_api_key`.
 
     Returns
     -------
     PredictResponse
         Objet de réponse contenant :
+        - l'identifiant unique de requête,
         - la classe prédite,
         - le score,
         - la version du modèle,
         - la latence d'inférence.
-
-    Raises
-    ------
-    HTTPException
-        Peut être levée indirectement en cas de clé API invalide.
-
-    Notes
-    -----
-    - La latence mesurée ici concerne la phase de prédiction applicative.
-    - La journalisation en base permet de conserver un historique
-      utile pour le monitoring et l'audit.
     """
-    # -------------------------------------------------------------------------
-    # Début de la mesure de temps
-    # -------------------------------------------------------------------------
+    request_id = str(uuid.uuid4())
+    features = payload.features.model_dump(by_alias=True)
+    logger = LoggingService(db=db)
+
     start_time = time.perf_counter()
 
-    # -------------------------------------------------------------------------
-    # Appel au modèle de prédiction
-    # -------------------------------------------------------------------------
-    prediction, score = make_prediction(payload.features)
+    try:
+        prediction, score, threshold_used = make_prediction(features)
+        latency_ms = (time.perf_counter() - start_time) * 1000
 
-    # -------------------------------------------------------------------------
-    # Calcul de la latence en millisecondes
-    # -------------------------------------------------------------------------
-    latency_ms = (time.perf_counter() - start_time) * 1000
+        features_df = pd.DataFrame([features])
 
-    # -------------------------------------------------------------------------
-    # Journalisation du résultat en base PostgreSQL
-    # -------------------------------------------------------------------------
-    create_prediction_log(
-        db=db,
-        client_id=payload.SK_ID_CURR,
-        prediction=prediction,
-        score=score,
-        model_version=MODEL_VERSION,
-        input_data=payload.features,
-        latency_ms=latency_ms,
-    )
+        logger.log_full_prediction_event(
+            request_id=request_id,
+            model_name=MODEL_NAME,
+            model_version=MODEL_VERSION,
+            features_df=features_df,
+            raw_input_data=features,
+            prediction=prediction,
+            score=score,
+            threshold_used=threshold_used,
+            latency_ms=latency_ms,
+            client_id=payload.SK_ID_CURR,
+            write_feature_store_monitoring=True,
+            source_table="api_request",
+            output_data={
+                "request_id": request_id,
+                "prediction": prediction,
+                "score": score,
+                "threshold_used": threshold_used,
+                "model_name": MODEL_NAME,
+                "model_version": MODEL_VERSION,
+                "latency_ms": latency_ms,
+            },
+            status_code=200,
+        )
 
-    # -------------------------------------------------------------------------
-    # Construction et retour de la réponse API
-    # -------------------------------------------------------------------------
-    return PredictResponse(
-        prediction=prediction,
-        score=score,
-        model_version=MODEL_VERSION,
-        latency_ms=latency_ms,
-    )
+        logger.commit()
+
+        return PredictResponse(
+            request_id=request_id,
+            prediction=prediction,
+            score=score,
+            model_version=MODEL_VERSION,
+            latency_ms=latency_ms,
+        )
+
+    except HTTPException:
+        logger.rollback()
+        raise
+
+    except Exception as exc:
+        logger.rollback()
+        latency_ms = (time.perf_counter() - start_time) * 1000
+
+        try:
+            logger.log_prediction_error(
+                request_id=request_id,
+                model_name=MODEL_NAME,
+                model_version=MODEL_VERSION,
+                input_data=features,
+                error_message=str(exc),
+                client_id=payload.SK_ID_CURR,
+                status_code=500,
+                latency_ms=latency_ms,
+            )
+            logger.commit()
+
+        except Exception:
+            logger.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Prediction failed: {exc}",
+        )

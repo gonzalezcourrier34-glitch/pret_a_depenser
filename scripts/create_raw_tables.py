@@ -545,8 +545,6 @@ def create_indexes(engine) -> None:
         for sql in CREATE_INDEXES_SQL:
             connection.execute(text(sql))
 
-    create_indexes(engine)
-    
     print("Index créés ou déjà existants.")
 
 def main() -> None:
@@ -567,6 +565,8 @@ def main() -> None:
     # -------------------------------------------------------------------------
     for create_table in TABLE_CREATORS:
         create_table(engine)
+
+    create_indexes(engine)
 
     print("Création des tables terminée.")
 

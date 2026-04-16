@@ -1,20 +1,54 @@
 """
-Création de la table finale compatible modèle.
+Script de création de la table finale compatible modèle.
 
-Cette table contient EXACTEMENT les features utilisées
-lors de l'entraînement du modèle.
+Ce module crée uniquement la structure de la table
+`features_client_test_model`, sans y insérer de données.
+
+Objectif
+--------
+Séparer la création de la structure de la logique de remplissage afin de :
+- clarifier les responsabilités
+- faciliter le débogage
+- rendre le pipeline plus lisible
+
+Notes
+-----
+- La table cible est `features_client_test_model`.
+- La structure est basée sur la liste exacte des colonnes attendues
+  par le modèle entraîné.
+- La table créée est vide.
+- `SK_ID_CURR` est conservée pour l'identification client.
 """
 
 import os
+
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
+
+# =============================================================================
+# Chargement des variables d'environnement
+# =============================================================================
+
 load_dotenv()
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# LA LISTE EXACTE DE FEATURES
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL n'est pas défini dans les variables d'environnement")
+
+
+# =============================================================================
+# Liste exacte des features du modèle
+# =============================================================================
+
 MODEL_FEATURES = """
+SK_ID_CURR,
 NAME_CONTRACT_TYPE,
 CODE_GENDER,
 FLAG_OWN_CAR,
@@ -217,42 +251,104 @@ EXT_POW2__EXT_SOURCE_2,
 EXT_POW2__EXT_SOURCE_3
 """
 
-def parse_features(features_str):
-    return [f.strip() for f in features_str.split(",") if f.strip()]
+
+# =============================================================================
+# Fonctions utilitaires
+# =============================================================================
+
+def parse_features(features_str: str) -> list[str]:
+    """
+    Convertit la chaîne de features en liste Python propre.
+
+    Parameters
+    ----------
+    features_str : str
+        Chaîne contenant les noms de colonnes séparés par des virgules.
+
+    Returns
+    -------
+    list[str]
+        Liste nettoyée des colonnes.
+    """
+    return [feature.strip() for feature in features_str.split(",") if feature.strip()]
 
 
-def create_model_ready_table(engine):
-    source_table = "features_client_test"
-    target_table = "features_client_test_model"
+# =============================================================================
+# SQL de création
+# =============================================================================
 
-    features = parse_features(MODEL_FEATURES)
+def build_create_model_ready_table_sql(features: list[str]) -> str:
+    """
+    Construit le SQL de création de la table vide `features_client_test_model`.
 
-    select_sql = ",\n    ".join(f'"{col}"' for col in features)
+    Parameters
+    ----------
+    features : list[str]
+        Liste exacte des colonnes attendues.
+
+    Returns
+    -------
+    str
+        Requête SQL de création.
+    """
+    select_sql = ",\n    ".join(f'NULL AS "{col}"' if col == "SK_ID_CURR" else f'NULL AS "{col}"' for col in features)
 
     sql = f"""
-    DROP TABLE IF EXISTS {target_table};
+    DROP TABLE IF EXISTS features_client_test_model;
 
-    CREATE TABLE {target_table} AS
+    CREATE TABLE features_client_test_model AS
     SELECT
         {select_sql}
-    FROM {source_table};
+    WHERE 1 = 0;
     """
+    return sql
 
-    index_sql = f"""
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_{target_table}_sk_id_curr
-    ON {target_table} ("SK_ID_CURR");
+
+CREATE_INDEX_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_features_client_test_model_sk_id_curr
+ON features_client_test_model ("SK_ID_CURR");
+"""
+
+
+# =============================================================================
+# Fonction principale de création
+# =============================================================================
+
+def create_model_ready_table(engine) -> None:
     """
+    Crée la table vide `features_client_test_model`.
 
-    with engine.begin() as conn:
-        conn.execute(text(sql))
-        conn.execute(text(index_sql))
+    Parameters
+    ----------
+    engine :
+        Moteur SQLAlchemy connecté à PostgreSQL.
+    """
+    features = parse_features(MODEL_FEATURES)
+    create_sql = build_create_model_ready_table_sql(features)
 
-    print(f"Table '{target_table}' créée avec {len(features)} features.")
+    with engine.begin() as connection:
+        connection.execute(text(create_sql))
+        connection.execute(text(CREATE_INDEX_SQL))
+
+    print("Table 'features_client_test_model' créée avec succès.")
+    print(f"Nombre de colonnes créées : {len(features)}")
 
 
-def main():
-    engine = create_engine(DATABASE_URL)
+# =============================================================================
+# Point d'entrée
+# =============================================================================
+
+def main() -> None:
+    """
+    Point d'entrée du script.
+    """
+    print("Connexion à PostgreSQL...")
+    engine = create_engine(DATABASE_URL, echo=False)
+    print("Connexion établie.")
+
     create_model_ready_table(engine)
+
+    print("Création de la table model ready terminée.")
 
 
 if __name__ == "__main__":

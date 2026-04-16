@@ -65,8 +65,6 @@ CSV_TO_TABLE_MAP = {
     "POS_CASH_balance.csv": "POS_CASH_balance",
     "previous_application.csv": "previous_application",
 }
-
-
 # =============================================================================
 # Fonction de chargement
 # =============================================================================
@@ -83,41 +81,56 @@ def load_csv_to_postgres(csv_path: Path, table_name: str, engine) -> None:
         Nom de la table PostgreSQL cible.
     engine :
         Moteur SQLAlchemy connecté à PostgreSQL.
-
-    Raises
-    ------
-    Exception
-        En cas d'erreur de lecture ou d'insertion.
     """
     print(f"\nChargement du fichier : {csv_path.name}")
     print(f"Table cible : {table_name}")
 
+    df = None
+
     try:
-        # ---------------------------------------------------------------------
-        # Lecture du CSV
-        # ---------------------------------------------------------------------
         df = pd.read_csv(csv_path)
 
         print(f"{len(df)} lignes lues depuis le fichier CSV.")
 
-        # ---------------------------------------------------------------------
-        # Insertion dans PostgreSQL
-        # ---------------------------------------------------------------------
-        df.to_sql(
-            name=table_name,
-            con=engine,
-            if_exists="append",   # important : on alimente la table existante
-            index=False,
-            method="multi",
-            chunksize=5000,
-        )
+        total_rows = len(df)
+        chunk_size = 500
+
+        for i in range(0, total_rows, chunk_size):
+            chunk = df.iloc[i:i+chunk_size]
+
+            chunk.to_sql(
+                name=table_name,
+                con=engine,
+                if_exists="append",
+                index=False,
+                method="multi",
+            )
+
+            print(f"{min(i+chunk_size, total_rows)} / {total_rows} lignes insérées")
 
         print(f"Données insérées dans la table '{table_name}'.")
 
     except Exception as e:
-        print(f"Erreur lors du chargement de {csv_path.name} : {e}")
-        raise
+        print("\n" + "=" * 80)
+        print("ERREUR LORS DU CHARGEMENT CSV -> POSTGRES")
+        print("=" * 80)
+        print(f"Fichier       : {csv_path}")
+        print(f"Table cible   : {table_name}")
+        print(f"Type erreur   : {type(e).__name__}")
+        print(f"Message       : {e}")
 
+        if hasattr(e, "__cause__") and e.__cause__ is not None:
+            print(f"Cause interne : {type(e.__cause__).__name__} - {e.__cause__}")
+
+        if hasattr(e, "orig"):
+            print(f"Erreur DBAPI  : {type(e.orig).__name__} - {e.orig}")
+
+        if df is not None:
+            print(f"Nb lignes DF  : {len(df)}")
+            print(f"Nb colonnes DF: {len(df.columns)}")
+
+        print("=" * 80 + "\n")
+        raise
 
 # =============================================================================
 # Point d'entrée
