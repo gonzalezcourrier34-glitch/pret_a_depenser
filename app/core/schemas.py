@@ -13,9 +13,17 @@ Garantir une cohérence stricte entre :
 - les données validées par l'API
 - les types Python exposés à FastAPI
 
+Architecture actuelle
+---------------------
+- les données de prédiction sont construites exclusivement
+  à partir de `application_test.csv`
+- les features agrégées de type `bureau__...` et `prev__...`
+  ne sont plus utilisées
+- la base PostgreSQL sert uniquement au logging et au monitoring
+
 Notes
 -----
-- Les noms de colonnes du modèle contiennent des caractères peu pratiques
+- Certains noms de colonnes contiennent des caractères peu pratiques
   pour Python, notamment des doubles underscores.
 - On génère donc un schéma dynamique avec :
   - des noms de champs Python "safe"
@@ -32,7 +40,10 @@ from typing import Optional, Type, cast
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 
-# Liste des features exactes attendues par le modèle
+# =============================================================================
+# Liste exacte des features attendues par le modèle
+# =============================================================================
+
 MODEL_FEATURES = [
     "NAME_CONTRACT_TYPE",
     "CODE_GENDER",
@@ -92,238 +103,6 @@ MODEL_FEATURES = [
     "AMT_REQ_CREDIT_BUREAU_MON",
     "AMT_REQ_CREDIT_BUREAU_QRT",
     "AMT_REQ_CREDIT_BUREAU_YEAR",
-    "bureau__DAYS_CREDIT__mean",
-    "bureau__DAYS_CREDIT__std",
-    "bureau__CREDIT_DAY_OVERDUE__mean",
-    "bureau__CREDIT_DAY_OVERDUE__std",
-    "bureau__DAYS_CREDIT_ENDDATE__mean",
-    "bureau__DAYS_CREDIT_ENDDATE__std",
-    "bureau__DAYS_ENDDATE_FACT__mean",
-    "bureau__DAYS_ENDDATE_FACT__std",
-    "bureau__AMT_CREDIT_MAX_OVERDUE__mean",
-    "bureau__AMT_CREDIT_MAX_OVERDUE__std",
-    "bureau__CNT_CREDIT_PROLONG__mean",
-    "bureau__CNT_CREDIT_PROLONG__std",
-    "bureau__AMT_CREDIT_SUM__mean",
-    "bureau__AMT_CREDIT_SUM__std",
-    "bureau__AMT_CREDIT_SUM_DEBT__mean",
-    "bureau__AMT_CREDIT_SUM_DEBT__std",
-    "bureau__AMT_CREDIT_SUM_LIMIT__mean",
-    "bureau__AMT_CREDIT_SUM_LIMIT__std",
-    "bureau__AMT_CREDIT_SUM_OVERDUE__mean",
-    "bureau__AMT_CREDIT_SUM_OVERDUE__std",
-    "bureau__DAYS_CREDIT_UPDATE__mean",
-    "bureau__DAYS_CREDIT_UPDATE__std",
-    "bureau__AMT_ANNUITY__mean",
-    "bureau__AMT_ANNUITY__std",
-    "bureau__DEBT_RATIO__mean",
-    "bureau__DEBT_RATIO__std",
-    "bureau__OVERDUE_RATIO__mean",
-    "bureau__OVERDUE_RATIO__std",
-    "bureau__IS_ACTIVE__mean",
-    "bureau__IS_ACTIVE__std",
-    "bureau__HAS_OVERDUE__mean",
-    "bureau__HAS_OVERDUE__std",
-    "bureau__CREDIT_AGE__mean",
-    "bureau__CREDIT_AGE__std",
-    "bureau__bb__MONTHS_BALANCE__mean__mean",
-    "bureau__bb__MONTHS_BALANCE__mean__std",
-    "bureau__bb__MONTHS_BALANCE__std__mean",
-    "bureau__bb__MONTHS_BALANCE__std__std",
-    "bureau__bb__count_rows__mean",
-    "bureau__bb__count_rows__std",
-    "bureau__bb__recent_max_dpd__mean",
-    "bureau__bb__recent_max_dpd__std",
-    "bureau__bb__months_late_ratio__mean",
-    "bureau__bb__months_late_ratio__std",
-    "bureau__bb__late_severity_sum__mean",
-    "bureau__bb__late_severity_sum__std",
-    "bureau__count_rows",
-    "bureau__nunique_SK_ID_BUREAU",
-    "prev__AMT_ANNUITY__mean",
-    "prev__AMT_ANNUITY__std",
-    "prev__AMT_APPLICATION__mean",
-    "prev__AMT_APPLICATION__std",
-    "prev__AMT_CREDIT__mean",
-    "prev__AMT_CREDIT__std",
-    "prev__AMT_DOWN_PAYMENT__mean",
-    "prev__AMT_DOWN_PAYMENT__std",
-    "prev__AMT_GOODS_PRICE__mean",
-    "prev__AMT_GOODS_PRICE__std",
-    "prev__HOUR_APPR_PROCESS_START__mean",
-    "prev__HOUR_APPR_PROCESS_START__std",
-    "prev__NFLAG_LAST_APPL_IN_DAY__mean",
-    "prev__NFLAG_LAST_APPL_IN_DAY__std",
-    "prev__RATE_DOWN_PAYMENT__mean",
-    "prev__RATE_DOWN_PAYMENT__std",
-    "prev__DAYS_DECISION__mean",
-    "prev__DAYS_DECISION__std",
-    "prev__SELLERPLACE_AREA__mean",
-    "prev__SELLERPLACE_AREA__std",
-    "prev__CNT_PAYMENT__mean",
-    "prev__CNT_PAYMENT__std",
-    "prev__DAYS_FIRST_DRAWING__mean",
-    "prev__DAYS_FIRST_DUE__mean",
-    "prev__DAYS_FIRST_DUE__std",
-    "prev__DAYS_LAST_DUE_1ST_VERSION__mean",
-    "prev__DAYS_LAST_DUE_1ST_VERSION__std",
-    "prev__DAYS_LAST_DUE__mean",
-    "prev__DAYS_LAST_DUE__std",
-    "prev__DAYS_TERMINATION__mean",
-    "prev__DAYS_TERMINATION__std",
-    "prev__NFLAG_INSURED_ON_APPROVAL__mean",
-    "prev__NFLAG_INSURED_ON_APPROVAL__std",
-    "prev__PREV_CREDIT_APPLICATION_RATIO__mean",
-    "prev__PREV_CREDIT_APPLICATION_RATIO__std",
-    "prev__PREV_IS_APPROVED__mean",
-    "prev__PREV_IS_APPROVED__std",
-    "prev__PREV_IS_REFUSED__mean",
-    "prev__PREV_IS_REFUSED__std",
-    "prev__PREV_DAYS_DECISION_AGE__mean",
-    "prev__PREV_DAYS_DECISION_AGE__std",
-    "prev__PREV_CREDIT_DURATION__mean",
-    "prev__PREV_CREDIT_DURATION__std",
-    "prev__pos__MONTHS_BALANCE__mean__mean",
-    "prev__pos__MONTHS_BALANCE__mean__std",
-    "prev__pos__MONTHS_BALANCE__std__mean",
-    "prev__pos__MONTHS_BALANCE__std__std",
-    "prev__pos__CNT_INSTALMENT__mean__mean",
-    "prev__pos__CNT_INSTALMENT__mean__std",
-    "prev__pos__CNT_INSTALMENT__std__mean",
-    "prev__pos__CNT_INSTALMENT__std__std",
-    "prev__pos__CNT_INSTALMENT_FUTURE__mean__mean",
-    "prev__pos__CNT_INSTALMENT_FUTURE__mean__std",
-    "prev__pos__CNT_INSTALMENT_FUTURE__std__mean",
-    "prev__pos__CNT_INSTALMENT_FUTURE__std__std",
-    "prev__pos__SK_DPD__mean__mean",
-    "prev__pos__SK_DPD__mean__std",
-    "prev__pos__SK_DPD__max__mean",
-    "prev__pos__SK_DPD__max__std",
-    "prev__pos__SK_DPD__std__mean",
-    "prev__pos__SK_DPD__std__std",
-    "prev__pos__SK_DPD_DEF__mean__mean",
-    "prev__pos__SK_DPD_DEF__mean__std",
-    "prev__pos__SK_DPD_DEF__max__mean",
-    "prev__pos__SK_DPD_DEF__max__std",
-    "prev__pos__SK_DPD_DEF__std__mean",
-    "prev__pos__SK_DPD_DEF__std__std",
-    "prev__pos__POS_REMAIN_RATIO__mean__mean",
-    "prev__pos__POS_REMAIN_RATIO__mean__std",
-    "prev__pos__POS_REMAIN_RATIO__std__mean",
-    "prev__pos__POS_REMAIN_RATIO__std__std",
-    "prev__pos__POS_DPD_POS__mean__mean",
-    "prev__pos__POS_DPD_POS__mean__std",
-    "prev__pos__POS_DPD_POS__max__mean",
-    "prev__pos__POS_DPD_POS__max__std",
-    "prev__pos__POS_DPD_POS__std__mean",
-    "prev__pos__POS_DPD_POS__std__std",
-    "prev__pos__POS_IS_ACTIVE__mean__mean",
-    "prev__pos__POS_IS_ACTIVE__mean__std",
-    "prev__pos__POS_IS_ACTIVE__std__mean",
-    "prev__pos__POS_IS_ACTIVE__std__std",
-    "prev__pos__count_rows__mean",
-    "prev__pos__count_rows__std",
-    "prev__cc__MONTHS_BALANCE__mean__mean",
-    "prev__cc__MONTHS_BALANCE__std__mean",
-    "prev__cc__AMT_BALANCE__mean__mean",
-    "prev__cc__AMT_BALANCE__std__mean",
-    "prev__cc__AMT_CREDIT_LIMIT_ACTUAL__mean__mean",
-    "prev__cc__AMT_CREDIT_LIMIT_ACTUAL__std__mean",
-    "prev__cc__AMT_DRAWINGS_ATM_CURRENT__mean__mean",
-    "prev__cc__AMT_DRAWINGS_ATM_CURRENT__std__mean",
-    "prev__cc__AMT_DRAWINGS_CURRENT__mean__mean",
-    "prev__cc__AMT_DRAWINGS_CURRENT__std__mean",
-    "prev__cc__AMT_DRAWINGS_OTHER_CURRENT__mean__mean",
-    "prev__cc__AMT_DRAWINGS_OTHER_CURRENT__std__mean",
-    "prev__cc__AMT_DRAWINGS_POS_CURRENT__mean__mean",
-    "prev__cc__AMT_DRAWINGS_POS_CURRENT__std__mean",
-    "prev__cc__AMT_INST_MIN_REGULARITY__mean__mean",
-    "prev__cc__AMT_INST_MIN_REGULARITY__std__mean",
-    "prev__cc__AMT_PAYMENT_CURRENT__mean__mean",
-    "prev__cc__AMT_PAYMENT_CURRENT__std__mean",
-    "prev__cc__AMT_PAYMENT_TOTAL_CURRENT__mean__mean",
-    "prev__cc__AMT_PAYMENT_TOTAL_CURRENT__std__mean",
-    "prev__cc__AMT_RECEIVABLE_PRINCIPAL__mean__mean",
-    "prev__cc__AMT_RECEIVABLE_PRINCIPAL__std__mean",
-    "prev__cc__AMT_RECIVABLE__mean__mean",
-    "prev__cc__AMT_RECIVABLE__std__mean",
-    "prev__cc__AMT_TOTAL_RECEIVABLE__mean__mean",
-    "prev__cc__AMT_TOTAL_RECEIVABLE__std__mean",
-    "prev__cc__CNT_DRAWINGS_ATM_CURRENT__mean__mean",
-    "prev__cc__CNT_DRAWINGS_ATM_CURRENT__std__mean",
-    "prev__cc__CNT_DRAWINGS_CURRENT__mean__mean",
-    "prev__cc__CNT_DRAWINGS_CURRENT__std__mean",
-    "prev__cc__CNT_DRAWINGS_OTHER_CURRENT__mean__mean",
-    "prev__cc__CNT_DRAWINGS_OTHER_CURRENT__std__mean",
-    "prev__cc__CNT_DRAWINGS_POS_CURRENT__mean__mean",
-    "prev__cc__CNT_DRAWINGS_POS_CURRENT__std__mean",
-    "prev__cc__CNT_INSTALMENT_MATURE_CUM__mean__mean",
-    "prev__cc__CNT_INSTALMENT_MATURE_CUM__std__mean",
-    "prev__cc__SK_DPD__mean__mean",
-    "prev__cc__SK_DPD__max__mean",
-    "prev__cc__SK_DPD__std__mean",
-    "prev__cc__SK_DPD_DEF__mean__mean",
-    "prev__cc__SK_DPD_DEF__max__mean",
-    "prev__cc__SK_DPD_DEF__std__mean",
-    "prev__cc__CC_UTILIZATION_RATIO__mean__mean",
-    "prev__cc__CC_UTILIZATION_RATIO__max__mean",
-    "prev__cc__CC_UTILIZATION_RATIO__std__mean",
-    "prev__cc__CC_PAYMENT_MIN_RATIO__mean__mean",
-    "prev__cc__CC_PAYMENT_MIN_RATIO__max__mean",
-    "prev__cc__CC_PAYMENT_MIN_RATIO__std__mean",
-    "prev__cc__CC_PAYMENT_BALANCE_RATIO__mean__mean",
-    "prev__cc__CC_PAYMENT_BALANCE_RATIO__max__mean",
-    "prev__cc__CC_PAYMENT_BALANCE_RATIO__std__mean",
-    "prev__cc__CC_DPD_POS__mean__mean",
-    "prev__cc__CC_DPD_POS__max__mean",
-    "prev__cc__CC_DPD_POS__std__mean",
-    "prev__cc__CC_RECEIVABLE_RATIO__mean__mean",
-    "prev__cc__CC_RECEIVABLE_RATIO__std__mean",
-    "prev__cc__count_rows__mean",
-    "prev__inst__NUM_INSTALMENT_VERSION__mean__mean",
-    "prev__inst__NUM_INSTALMENT_VERSION__mean__std",
-    "prev__inst__NUM_INSTALMENT_VERSION__std__mean",
-    "prev__inst__NUM_INSTALMENT_VERSION__std__std",
-    "prev__inst__NUM_INSTALMENT_NUMBER__mean__mean",
-    "prev__inst__NUM_INSTALMENT_NUMBER__mean__std",
-    "prev__inst__NUM_INSTALMENT_NUMBER__std__mean",
-    "prev__inst__NUM_INSTALMENT_NUMBER__std__std",
-    "prev__inst__DAYS_INSTALMENT__mean__mean",
-    "prev__inst__DAYS_INSTALMENT__mean__std",
-    "prev__inst__DAYS_INSTALMENT__std__mean",
-    "prev__inst__DAYS_INSTALMENT__std__std",
-    "prev__inst__DAYS_ENTRY_PAYMENT__mean__mean",
-    "prev__inst__DAYS_ENTRY_PAYMENT__mean__std",
-    "prev__inst__DAYS_ENTRY_PAYMENT__std__mean",
-    "prev__inst__DAYS_ENTRY_PAYMENT__std__std",
-    "prev__inst__AMT_INSTALMENT__mean__mean",
-    "prev__inst__AMT_INSTALMENT__mean__std",
-    "prev__inst__AMT_INSTALMENT__std__mean",
-    "prev__inst__AMT_INSTALMENT__std__std",
-    "prev__inst__AMT_PAYMENT__mean__mean",
-    "prev__inst__AMT_PAYMENT__mean__std",
-    "prev__inst__AMT_PAYMENT__std__mean",
-    "prev__inst__AMT_PAYMENT__std__std",
-    "prev__inst__DPD_POS__mean__mean",
-    "prev__inst__DPD_POS__mean__std",
-    "prev__inst__DPD_POS__max__mean",
-    "prev__inst__DPD_POS__max__std",
-    "prev__inst__DPD_POS__std__mean",
-    "prev__inst__DPD_POS__std__std",
-    "prev__inst__SEVERE_LATE_30__mean__mean",
-    "prev__inst__SEVERE_LATE_30__mean__std",
-    "prev__inst__SEVERE_LATE_30__max__mean",
-    "prev__inst__SEVERE_LATE_30__max__std",
-    "prev__inst__SEVERE_LATE_30__std__mean",
-    "prev__inst__SEVERE_LATE_30__std__std",
-    "prev__inst__PAY_RATIO__mean__mean",
-    "prev__inst__PAY_RATIO__mean__std",
-    "prev__inst__PAY_RATIO__std__mean",
-    "prev__inst__PAY_RATIO__std__std",
-    "prev__inst__count_rows__mean",
-    "prev__inst__count_rows__std",
-    "prev__count_rows",
-    "prev__nunique_SK_ID_PREV",
     "AGE_YEARS",
     "EMPLOYED_YEARS",
     "REGISTRATION_YEARS",
@@ -367,7 +146,10 @@ MODEL_FEATURES = [
 ]
 
 
-# Groupes de features par type
+# =============================================================================
+# Typage métier des features
+# =============================================================================
+
 CATEGORICAL_FEATURES = {
     "NAME_CONTRACT_TYPE",
     "CODE_GENDER",
@@ -414,7 +196,10 @@ INTEGER_FEATURES = {
 }
 
 
-# Fonctions utilitaires
+# =============================================================================
+# Helpers
+# =============================================================================
+
 def to_safe_field_name(feature_name: str) -> str:
     """
     Transforme un nom de feature SQL / modèle en nom de champ Python valide.
@@ -437,7 +222,7 @@ def to_safe_field_name(feature_name: str) -> str:
     safe_name = safe_name.replace(")", "_")
     safe_name = safe_name.replace(" ", "_")
 
-    if safe_name[0].isdigit():
+    if safe_name and safe_name[0].isdigit():
         safe_name = f"f_{safe_name}"
 
     return safe_name
@@ -458,15 +243,18 @@ def get_field_definition(feature_name: str):
         Tuple de la forme (type, Field(...)) pour create_model.
     """
     if feature_name in CATEGORICAL_FEATURES:
-        return (Optional[str], Field(default=None, alias=feature_name))
+        return Optional[str], Field(default=None, alias=feature_name)
 
     if feature_name in INTEGER_FEATURES:
-        return (Optional[int], Field(default=None, alias=feature_name))
+        return Optional[int], Field(default=None, alias=feature_name)
 
-    return (Optional[float], Field(default=None, alias=feature_name))
+    return Optional[float], Field(default=None, alias=feature_name)
 
 
-# Base commune pour le schéma dynamique
+# =============================================================================
+# Schéma dynamique d'entrée modèle
+# =============================================================================
+
 class CreditModelInputBase(BaseModel):
     """
     Base commune pour le schéma des features d'entrée du modèle.
@@ -479,7 +267,6 @@ class CreditModelInputBase(BaseModel):
     )
 
 
-# Génération dynamique du schéma d'entrée modèle
 fields = {
     to_safe_field_name(feature_name): get_field_definition(feature_name)
     for feature_name in MODEL_FEATURES
@@ -491,11 +278,14 @@ CreditModelInput = cast(
         "CreditModelInput",
         __base__=CreditModelInputBase,
         **fields,
-    )
+    ),
 )
 
 
+# =============================================================================
 # Schémas API
+# =============================================================================
+
 class PredictRequest(BaseModel):
     """
     Schéma d'entrée de l'API de prédiction.
@@ -509,7 +299,7 @@ class PredictRequest(BaseModel):
     """
 
     SK_ID_CURR: Optional[int] = None
-    features: CreditModelInput # type: ignore
+    features: CreditModelInput  # type: ignore
 
 
 class PredictResponse(BaseModel):
@@ -518,6 +308,8 @@ class PredictResponse(BaseModel):
 
     Attributes
     ----------
+    request_id : str
+        Identifiant unique de la requête de prédiction.
     prediction : int
         Classe prédite (0 ou 1).
     score : float
@@ -528,10 +320,76 @@ class PredictResponse(BaseModel):
         Temps d'inférence en millisecondes.
     """
 
+    request_id: str
     prediction: int
     score: float
     model_version: str
     latency_ms: float
+
+
+class PredictBatchItemResponse(BaseModel):
+    """
+    Schéma de réponse pour un élément d'un batch de prédictions.
+
+    Attributes
+    ----------
+    request_id : str
+        Identifiant unique de la requête.
+    client_id : Optional[int]
+        Identifiant client éventuel.
+    prediction : Optional[int]
+        Classe prédite si succès.
+    score : Optional[float]
+        Score associé si succès.
+    model_version : str
+        Version du modèle utilisée.
+    latency_ms : float
+        Temps d'inférence en millisecondes.
+    status : str
+        Statut de traitement ('success' ou 'error').
+    error_message : Optional[str]
+        Message d'erreur éventuel.
+    """
+
+    request_id: str
+    client_id: Optional[int] = None
+    prediction: Optional[int] = None
+    score: Optional[float] = None
+    model_version: str
+    latency_ms: float
+    status: str
+    error_message: Optional[str] = None
+
+
+class PredictBatchResponse(BaseModel):
+    """
+    Schéma de réponse pour un batch de prédictions.
+
+    Attributes
+    ----------
+    batch_size : int
+        Taille totale du batch demandé.
+    success_count : int
+        Nombre de prédictions réussies.
+    error_count : int
+        Nombre de prédictions en erreur.
+    model_name : str
+        Nom du modèle utilisé.
+    model_version : str
+        Version du modèle utilisée.
+    batch_latency_ms : float
+        Temps total du batch en millisecondes.
+    items : list[PredictBatchItemResponse]
+        Détail ligne par ligne du batch.
+    """
+
+    batch_size: int
+    success_count: int
+    error_count: int
+    model_name: str
+    model_version: str
+    batch_latency_ms: float
+    items: list[PredictBatchItemResponse]
 
 
 class HealthResponse(BaseModel):

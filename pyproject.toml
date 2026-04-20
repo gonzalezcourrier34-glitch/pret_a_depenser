@@ -7,6 +7,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.18.4",
     "catboost>=1.2.10",
+    "evidently>=0.7.21",
     "imblearn>=0.0",
     "ipykernel>=7.2.0",
     "ipywidgets>=8.1.8",

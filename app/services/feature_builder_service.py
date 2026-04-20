@@ -1,0 +1,719 @@
+"""
+Service unique de construction des features prêtes pour le modèle.
+
+Ce module centralise toute la logique utile pour produire les features
+attendues par le modèle de scoring crédit, exclusivement à partir des
+données issues de `application_test.csv`.
+
+Objectif
+--------
+Fournir un point d'entrée métier unique au reste de l'application afin de :
+- charger les données source déjà présentes en mémoire
+- sélectionner les colonnes de base utiles
+- construire les variables dérivées
+- aligner strictement le résultat sur `MODEL_FEATURES`
+- retourner soit un DataFrame complet, soit les features d'un seul client
+
+Architecture actuelle
+---------------------
+- les données source proviennent exclusivement de `application_test.csv`
+- aucune lecture de features n'est réalisée depuis PostgreSQL
+- PostgreSQL sert uniquement au logging et au monitoring
+
+Fonctions principales
+---------------------
+- load_raw_csv_sources(...)
+    Charge les sources CSV utiles au builder
+- build_features_from_loaded_data(...)
+    Construit un DataFrame final prêt pour le modèle
+- build_model_ready_features(...)
+    Point d'entrée métier pour l'application
+- build_features_for_client(...)
+    Construit un dictionnaire de features pour un seul client
+
+Notes
+-----
+- Le DataFrame final est strictement aligné sur `MODEL_FEATURES`
+- Les colonnes manquantes sont créées avec NaN
+- Les colonnes supplémentaires sont ignorées à l'étape finale
+- `SK_ID_CURR` peut être conservée optionnellement
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Sequence
+
+import numpy as np
+import pandas as pd
+
+from app.core.schemas import MODEL_FEATURES
+
+
+# =============================================================================
+# Colonnes de base attendues depuis application_test.csv
+# =============================================================================
+
+APPLICATION_BASE_COLUMNS = [
+    "SK_ID_CURR",
+    "NAME_CONTRACT_TYPE",
+    "CODE_GENDER",
+    "FLAG_OWN_CAR",
+    "FLAG_OWN_REALTY",
+    "CNT_CHILDREN",
+    "AMT_INCOME_TOTAL",
+    "AMT_CREDIT",
+    "AMT_ANNUITY",
+    "AMT_GOODS_PRICE",
+    "NAME_TYPE_SUITE",
+    "NAME_INCOME_TYPE",
+    "NAME_EDUCATION_TYPE",
+    "NAME_FAMILY_STATUS",
+    "NAME_HOUSING_TYPE",
+    "REGION_POPULATION_RELATIVE",
+    "DAYS_BIRTH",
+    "DAYS_EMPLOYED",
+    "DAYS_REGISTRATION",
+    "DAYS_ID_PUBLISH",
+    "OWN_CAR_AGE",
+    "FLAG_MOBIL",
+    "FLAG_EMP_PHONE",
+    "FLAG_WORK_PHONE",
+    "FLAG_PHONE",
+    "FLAG_EMAIL",
+    "OCCUPATION_TYPE",
+    "CNT_FAM_MEMBERS",
+    "REGION_RATING_CLIENT",
+    "REGION_RATING_CLIENT_W_CITY",
+    "WEEKDAY_APPR_PROCESS_START",
+    "HOUR_APPR_PROCESS_START",
+    "REG_REGION_NOT_LIVE_REGION",
+    "REG_REGION_NOT_WORK_REGION",
+    "LIVE_REGION_NOT_WORK_REGION",
+    "REG_CITY_NOT_LIVE_CITY",
+    "REG_CITY_NOT_WORK_CITY",
+    "LIVE_CITY_NOT_WORK_CITY",
+    "EXT_SOURCE_1",
+    "EXT_SOURCE_2",
+    "EXT_SOURCE_3",
+    "APARTMENTS_AVG",
+    "BASEMENTAREA_AVG",
+    "YEARS_BEGINEXPLUATATION_AVG",
+    "ELEVATORS_AVG",
+    "ENTRANCES_AVG",
+    "FLOORSMAX_AVG",
+    "LANDAREA_AVG",
+    "LIVINGAREA_AVG",
+    "NONLIVINGAREA_AVG",
+    "OBS_30_CNT_SOCIAL_CIRCLE",
+    "DEF_30_CNT_SOCIAL_CIRCLE",
+    "OBS_60_CNT_SOCIAL_CIRCLE",
+    "DEF_60_CNT_SOCIAL_CIRCLE",
+    "DAYS_LAST_PHONE_CHANGE",
+    "AMT_REQ_CREDIT_BUREAU_HOUR",
+    "AMT_REQ_CREDIT_BUREAU_WEEK",
+    "AMT_REQ_CREDIT_BUREAU_MON",
+    "AMT_REQ_CREDIT_BUREAU_QRT",
+    "AMT_REQ_CREDIT_BUREAU_YEAR",
+    "FLAG_DOCUMENT_2",
+    "FLAG_DOCUMENT_3",
+    "FLAG_DOCUMENT_4",
+    "FLAG_DOCUMENT_5",
+    "FLAG_DOCUMENT_6",
+    "FLAG_DOCUMENT_7",
+    "FLAG_DOCUMENT_8",
+    "FLAG_DOCUMENT_9",
+    "FLAG_DOCUMENT_10",
+    "FLAG_DOCUMENT_11",
+    "FLAG_DOCUMENT_12",
+    "FLAG_DOCUMENT_13",
+    "FLAG_DOCUMENT_14",
+    "FLAG_DOCUMENT_15",
+    "FLAG_DOCUMENT_16",
+    "FLAG_DOCUMENT_17",
+    "FLAG_DOCUMENT_18",
+    "FLAG_DOCUMENT_19",
+    "FLAG_DOCUMENT_20",
+    "FLAG_DOCUMENT_21",
+]
+
+
+# =============================================================================
+# Utilitaires debug
+# =============================================================================
+
+def _debug_title(title: str) -> None:
+    """
+    Affiche un séparateur lisible pour le debug.
+    """
+    print("\n" + "=" * 90)
+    print(f"[FEATURE_BUILDER] {title}")
+    print("=" * 90)
+
+
+def _debug_df(
+    df: pd.DataFrame,
+    name: str,
+    *,
+    preview_rows: int = 3,
+    show_columns: bool = False,
+    show_missing: bool = True,
+) -> None:
+    """
+    Affiche un résumé lisible d'un DataFrame pour le debug.
+    """
+    print(f"\n[DEBUG] {name}")
+    print(f"Shape               : {df.shape}")
+    print(f"Nb colonnes         : {len(df.columns)}")
+    print(f"Doublons index      : {df.index.duplicated().sum()}")
+
+    if show_missing:
+        total_na = int(df.isna().sum().sum())
+        print(f"Total valeurs NA    : {total_na}")
+
+        na_cols = df.isna().sum()
+        na_cols = na_cols[na_cols > 0].sort_values(ascending=False)
+
+        if len(na_cols) == 0:
+            print("Colonnes avec NA    : aucune")
+        else:
+            print(f"Colonnes avec NA    : {len(na_cols)}")
+            for col, nb in na_cols.head(10).items():
+                pct = (nb / len(df) * 100) if len(df) > 0 else 0
+                print(f"  - {col}: {nb} ({pct:.2f} %)")
+
+    if show_columns:
+        print("Colonnes :")
+        print(list(df.columns))
+
+    if preview_rows > 0 and len(df) > 0:
+        print("Aperçu :")
+        print(df.head(preview_rows).to_string())
+
+
+# =============================================================================
+# Chargement des sources CSV
+# =============================================================================
+
+def load_raw_csv_sources(data_dir: Path | str) -> dict[str, pd.DataFrame]:
+    """
+    Charge les sources CSV utiles au feature builder.
+
+    Dans la version actuelle, seule `application_test.csv` est nécessaire.
+
+    Parameters
+    ----------
+    data_dir : Path | str
+        Dossier contenant les CSV source.
+
+    Returns
+    -------
+    dict[str, pd.DataFrame]
+        Dictionnaire des sources chargées.
+
+    Raises
+    ------
+    FileNotFoundError
+        Si `application_test.csv` est introuvable.
+    """
+    data_dir = Path(data_dir)
+    application_test_path = data_dir / "application_test.csv"
+
+    if not application_test_path.exists():
+        raise FileNotFoundError(
+            f"Fichier introuvable : {application_test_path}"
+        )
+
+    application_test_df = pd.read_csv(application_test_path)
+
+    return {
+        "application_test": application_test_df,
+    }
+
+
+# =============================================================================
+# Helpers généraux
+# =============================================================================
+
+def _normalize_client_ids(client_ids: Sequence[int] | None) -> list[int] | None:
+    """
+    Normalise une séquence d'identifiants clients.
+    """
+    if client_ids is None:
+        return None
+
+    return [int(x) for x in client_ids]
+
+
+def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """
+    Ajoute les colonnes manquantes dans un DataFrame avec NaN comme valeur.
+    """
+    result = df.copy()
+
+    for col in columns:
+        if col not in result.columns:
+            result[col] = np.nan
+
+    return result
+
+
+def _coalesce_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    """
+    Réalise une division protégée contre les divisions par zéro.
+    """
+    safe_denominator = denominator.replace(0, np.nan)
+    result = numerator / safe_denominator
+    result = result.replace([np.inf, -np.inf], np.nan)
+    return result
+
+
+def _extract_application_test_df(source: Any) -> pd.DataFrame:
+    """
+    Extrait le DataFrame `application_test` depuis une source souple.
+
+    Formes supportées
+    -----------------
+    - un DataFrame directement
+    - un dictionnaire contenant `application_test`
+    - un dictionnaire contenant `app`
+
+    Parameters
+    ----------
+    source : Any
+        Source passée au builder.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame `application_test`.
+
+    Raises
+    ------
+    ValueError
+        Si aucune source exploitable n'est trouvée.
+    TypeError
+        Si l'objet extrait n'est pas un DataFrame pandas.
+    """
+    if isinstance(source, pd.DataFrame):
+        return source.copy()
+
+    if isinstance(source, dict):
+        if "application_test" in source:
+            df = source["application_test"]
+        elif "app" in source:
+            df = source["app"]
+        else:
+            raise ValueError(
+                "La source ne contient ni 'application_test' ni 'app'."
+            )
+
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("La source extraite n'est pas un DataFrame pandas.")
+
+        return df.copy()
+
+    raise TypeError(
+        "La source doit être un DataFrame ou un dictionnaire de DataFrames."
+    )
+
+
+def _validate_feature_alignment(df: pd.DataFrame, *, debug: bool = False) -> None:
+    """
+    Valide l'alignement des colonnes par rapport aux features du modèle.
+    """
+    missing = [col for col in MODEL_FEATURES if col not in df.columns]
+    extra = [col for col in df.columns if col not in MODEL_FEATURES and col != "SK_ID_CURR"]
+
+    print(f"[FEATURE_BUILDER] Nb colonnes attendues        : {len(MODEL_FEATURES)}")
+    print(f"[FEATURE_BUILDER] Nb colonnes présentes         : {len(df.columns)}")
+    print(f"[FEATURE_BUILDER] Nb colonnes manquantes        : {len(missing)}")
+    print(f"[FEATURE_BUILDER] Nb colonnes supplémentaires   : {len(extra)}")
+
+    if missing:
+        print(f"[FEATURE_BUILDER] Exemples colonnes manquantes : {missing[:10]}")
+    if extra:
+        print(f"[FEATURE_BUILDER] Exemples colonnes en trop    : {extra[:10]}")
+
+    if debug and missing:
+        print("[DEBUG] Liste complète des colonnes manquantes :")
+        for col in missing:
+            print(f"  - {col}")
+
+    if debug and extra:
+        print("[DEBUG] Liste complète des colonnes en trop :")
+        for col in extra:
+            print(f"  - {col}")
+
+
+def _align_model_features(
+    df: pd.DataFrame,
+    *,
+    debug: bool = False,
+    keep_id: bool = False,
+) -> pd.DataFrame:
+    """
+    Aligne le DataFrame final sur la liste exacte des features du modèle.
+    """
+    _validate_feature_alignment(df, debug=debug)
+
+    aligned_source = _ensure_columns(df, MODEL_FEATURES)
+
+    selected_columns = MODEL_FEATURES.copy()
+    if keep_id and "SK_ID_CURR" in aligned_source.columns:
+        selected_columns = ["SK_ID_CURR"] + selected_columns
+
+    aligned = aligned_source[selected_columns].copy()
+
+    if debug:
+        _debug_df(aligned, "features_aligned", preview_rows=3, show_missing=True)
+
+    return aligned
+
+
+# =============================================================================
+# Enrichissement final
+# =============================================================================
+
+def _enrich_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ajoute les variables dérivées finales attendues par le modèle.
+    """
+    f = df.copy()
+
+    required_for_enrichment = [
+        "DAYS_BIRTH",
+        "DAYS_EMPLOYED",
+        "DAYS_REGISTRATION",
+        "DAYS_ID_PUBLISH",
+        "DAYS_LAST_PHONE_CHANGE",
+        "OWN_CAR_AGE",
+        "EXT_SOURCE_1",
+        "EXT_SOURCE_2",
+        "EXT_SOURCE_3",
+        "AMT_CREDIT",
+        "AMT_INCOME_TOTAL",
+        "AMT_ANNUITY",
+        "AMT_GOODS_PRICE",
+        "DEF_30_CNT_SOCIAL_CIRCLE",
+        "OBS_30_CNT_SOCIAL_CIRCLE",
+        "DEF_60_CNT_SOCIAL_CIRCLE",
+        "OBS_60_CNT_SOCIAL_CIRCLE",
+        "FLAG_MOBIL",
+        "FLAG_EMP_PHONE",
+        "FLAG_WORK_PHONE",
+        "FLAG_PHONE",
+        "FLAG_EMAIL",
+        "REG_REGION_NOT_LIVE_REGION",
+        "REG_REGION_NOT_WORK_REGION",
+        "LIVE_REGION_NOT_WORK_REGION",
+        "REG_CITY_NOT_LIVE_CITY",
+        "REG_CITY_NOT_WORK_CITY",
+        "LIVE_CITY_NOT_WORK_CITY",
+        "AMT_REQ_CREDIT_BUREAU_HOUR",
+        "AMT_REQ_CREDIT_BUREAU_WEEK",
+        "AMT_REQ_CREDIT_BUREAU_MON",
+        "AMT_REQ_CREDIT_BUREAU_QRT",
+        "AMT_REQ_CREDIT_BUREAU_YEAR",
+    ]
+    f = _ensure_columns(f, required_for_enrichment)
+
+    # -------------------------------------------------------------------------
+    # Variables temporelles
+    # -------------------------------------------------------------------------
+    f["AGE_YEARS"] = -1.0 * f["DAYS_BIRTH"] / 365.25
+
+    f["EMPLOYED_YEARS"] = np.where(
+        f["DAYS_EMPLOYED"] == 365243,
+        np.nan,
+        -1.0 * f["DAYS_EMPLOYED"] / 365.25,
+    )
+
+    f["REGISTRATION_YEARS"] = -1.0 * f["DAYS_REGISTRATION"] / 365.25
+    f["ID_PUBLISH_YEARS"] = -1.0 * f["DAYS_ID_PUBLISH"] / 365.25
+
+    f["LAST_PHONE_CHANGE_YEARS"] = np.where(
+        f["DAYS_LAST_PHONE_CHANGE"] == 0,
+        np.nan,
+        -1.0 * f["DAYS_LAST_PHONE_CHANGE"] / 365.25,
+    )
+
+    # -------------------------------------------------------------------------
+    # Flags de valeurs manquantes
+    # -------------------------------------------------------------------------
+    f["DAYS_EMPLOYED__isna"] = (
+        (f["DAYS_EMPLOYED"].isna()) | (f["DAYS_EMPLOYED"] == 365243)
+    ).astype(int)
+    f["OWN_CAR_AGE__isna"] = f["OWN_CAR_AGE"].isna().astype(int)
+    f["EXT_SOURCE_1__isna"] = f["EXT_SOURCE_1"].isna().astype(int)
+    f["EXT_SOURCE_3__isna"] = f["EXT_SOURCE_3"].isna().astype(int)
+    f["DAYS_LAST_PHONE_CHANGE__isna"] = (
+        (f["DAYS_LAST_PHONE_CHANGE"].isna()) | (f["DAYS_LAST_PHONE_CHANGE"] == 0)
+    ).astype(int)
+    f["AMT_REQ_CREDIT_BUREAU_HOUR__isna"] = f["AMT_REQ_CREDIT_BUREAU_HOUR"].isna().astype(int)
+    f["AMT_REQ_CREDIT_BUREAU_WEEK__isna"] = f["AMT_REQ_CREDIT_BUREAU_WEEK"].isna().astype(int)
+    f["AMT_REQ_CREDIT_BUREAU_MON__isna"] = f["AMT_REQ_CREDIT_BUREAU_MON"].isna().astype(int)
+    f["AMT_REQ_CREDIT_BUREAU_QRT__isna"] = f["AMT_REQ_CREDIT_BUREAU_QRT"].isna().astype(int)
+    f["AMT_REQ_CREDIT_BUREAU_YEAR__isna"] = f["AMT_REQ_CREDIT_BUREAU_YEAR"].isna().astype(int)
+
+    # -------------------------------------------------------------------------
+    # Ratios financiers
+    # -------------------------------------------------------------------------
+    f["CREDIT_INCOME_RATIO"] = _coalesce_divide(f["AMT_CREDIT"], f["AMT_INCOME_TOTAL"])
+    f["ANNUITY_INCOME_RATIO"] = _coalesce_divide(f["AMT_ANNUITY"], f["AMT_INCOME_TOTAL"])
+    f["ANNUITY_CREDIT_RATIO"] = _coalesce_divide(f["AMT_ANNUITY"], f["AMT_CREDIT"])
+    f["CREDIT_GOODS_RATIO"] = _coalesce_divide(f["AMT_CREDIT"], f["AMT_GOODS_PRICE"])
+
+    f["OVER_INDEBTED_40"] = (f["ANNUITY_INCOME_RATIO"] > 0.40).astype(int)
+
+    # -------------------------------------------------------------------------
+    # Transformations log
+    # -------------------------------------------------------------------------
+    f["LOG_INCOME"] = np.log(np.maximum(f["AMT_INCOME_TOTAL"].fillna(0), 0) + 1)
+    f["LOG_CREDIT"] = np.log(np.maximum(f["AMT_CREDIT"].fillna(0), 0) + 1)
+    f["LOG_ANNUITY"] = np.log(np.maximum(f["AMT_ANNUITY"].fillna(0), 0) + 1)
+    f["LOG_GOODS"] = np.log(np.maximum(f["AMT_GOODS_PRICE"].fillna(0), 0) + 1)
+
+    # -------------------------------------------------------------------------
+    # Ratios sociaux
+    # -------------------------------------------------------------------------
+    f["SOCIAL_DEFAULT_RATIO_30"] = _coalesce_divide(
+        f["DEF_30_CNT_SOCIAL_CIRCLE"],
+        f["OBS_30_CNT_SOCIAL_CIRCLE"] + 1,
+    )
+    f["SOCIAL_DEFAULT_RATIO_60"] = _coalesce_divide(
+        f["DEF_60_CNT_SOCIAL_CIRCLE"],
+        f["OBS_60_CNT_SOCIAL_CIRCLE"] + 1,
+    )
+
+    # -------------------------------------------------------------------------
+    # Compteurs documentaires / contacts / incohérences adresse
+    # -------------------------------------------------------------------------
+    doc_cols = [
+        "FLAG_DOCUMENT_2",
+        "FLAG_DOCUMENT_3",
+        "FLAG_DOCUMENT_4",
+        "FLAG_DOCUMENT_5",
+        "FLAG_DOCUMENT_6",
+        "FLAG_DOCUMENT_7",
+        "FLAG_DOCUMENT_8",
+        "FLAG_DOCUMENT_9",
+        "FLAG_DOCUMENT_10",
+        "FLAG_DOCUMENT_11",
+        "FLAG_DOCUMENT_12",
+        "FLAG_DOCUMENT_13",
+        "FLAG_DOCUMENT_14",
+        "FLAG_DOCUMENT_15",
+        "FLAG_DOCUMENT_16",
+        "FLAG_DOCUMENT_17",
+        "FLAG_DOCUMENT_18",
+        "FLAG_DOCUMENT_19",
+        "FLAG_DOCUMENT_20",
+        "FLAG_DOCUMENT_21",
+    ]
+    f = _ensure_columns(f, doc_cols)
+
+    f["DOC_COUNT"] = f[doc_cols].fillna(0).sum(axis=1)
+
+    f["CONTACT_COUNT"] = f[
+        ["FLAG_MOBIL", "FLAG_EMP_PHONE", "FLAG_WORK_PHONE", "FLAG_PHONE", "FLAG_EMAIL"]
+    ].fillna(0).sum(axis=1)
+
+    f["ADDRESS_MISMATCH_COUNT"] = f[
+        [
+            "REG_REGION_NOT_LIVE_REGION",
+            "REG_REGION_NOT_WORK_REGION",
+            "LIVE_REGION_NOT_WORK_REGION",
+            "REG_CITY_NOT_LIVE_CITY",
+            "REG_CITY_NOT_WORK_CITY",
+            "LIVE_CITY_NOT_WORK_CITY",
+        ]
+    ].fillna(0).sum(axis=1)
+
+    # -------------------------------------------------------------------------
+    # Statistiques EXT_SOURCE
+    # -------------------------------------------------------------------------
+    ext_cols = ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"]
+    f = _ensure_columns(f, ext_cols)
+    ext_df = f[ext_cols]
+
+    f["EXT_SOURCES_MEAN"] = ext_df.mean(axis=1)
+    f["EXT_SOURCES_MIN"] = ext_df.min(axis=1)
+    f["EXT_SOURCES_MAX"] = ext_df.max(axis=1)
+    f["EXT_SOURCES_STD"] = ext_df.std(axis=1, ddof=0)
+    f["EXT_SOURCES_RANGE"] = f["EXT_SOURCES_MAX"] - f["EXT_SOURCES_MIN"]
+
+    # -------------------------------------------------------------------------
+    # Interactions EXT_SOURCE
+    # -------------------------------------------------------------------------
+    f["EXT_INT__EXT_SOURCE_1_x_EXT_SOURCE_2"] = f["EXT_SOURCE_1"] * f["EXT_SOURCE_2"]
+    f["EXT_INT__EXT_SOURCE_1_x_EXT_SOURCE_3"] = f["EXT_SOURCE_1"] * f["EXT_SOURCE_3"]
+    f["EXT_INT__EXT_SOURCE_2_x_EXT_SOURCE_3"] = f["EXT_SOURCE_2"] * f["EXT_SOURCE_3"]
+
+    f["EXT_POW2__EXT_SOURCE_1"] = f["EXT_SOURCE_1"] ** 2
+    f["EXT_POW2__EXT_SOURCE_2"] = f["EXT_SOURCE_2"] ** 2
+    f["EXT_POW2__EXT_SOURCE_3"] = f["EXT_SOURCE_3"] ** 2
+
+    return f
+
+
+# =============================================================================
+# Construction principale
+# =============================================================================
+
+def build_features_from_loaded_data(
+    raw_sources: pd.DataFrame | dict[str, pd.DataFrame],
+    *,
+    client_ids: Sequence[int] | None = None,
+    debug: bool = False,
+    keep_id: bool = False,
+) -> pd.DataFrame:
+    """
+    Construit les features modèle à partir de sources déjà chargées.
+
+    Parameters
+    ----------
+    raw_sources : pd.DataFrame | dict[str, pd.DataFrame]
+        Soit directement `application_test`, soit un dictionnaire contenant
+        `application_test`.
+    client_ids : Sequence[int] | None, default=None
+        Liste optionnelle de clients à reconstruire.
+    debug : bool, default=False
+        Active l'affichage détaillé des étapes.
+    keep_id : bool, default=False
+        Si True, conserve `SK_ID_CURR` dans la sortie.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame final aligné sur les features du modèle.
+
+    Raises
+    ------
+    ValueError
+        Si aucun client demandé n'est trouvé.
+    """
+    normalized_client_ids = _normalize_client_ids(client_ids)
+
+    if debug:
+        _debug_title("CONSTRUCTION DES FEATURES DEPUIS LES SOURCES CHARGÉES")
+
+    app = _extract_application_test_df(raw_sources)
+
+    if normalized_client_ids is not None:
+        if "SK_ID_CURR" not in app.columns:
+            raise ValueError("Colonne SK_ID_CURR absente de application_test.")
+
+        app = app[app["SK_ID_CURR"].isin(normalized_client_ids)].copy()
+
+        if app.empty:
+            raise ValueError(
+                f"Aucun client trouvé dans application_test pour client_ids={normalized_client_ids}"
+            )
+
+    if debug:
+        _debug_df(app, "application_test_source", preview_rows=3)
+
+    # -------------------------------------------------------------------------
+    # Base client
+    # -------------------------------------------------------------------------
+    app = _ensure_columns(app, APPLICATION_BASE_COLUMNS)
+    features = app[APPLICATION_BASE_COLUMNS].copy()
+
+    if debug:
+        _debug_title("BASE CLIENT")
+        _debug_df(features, "features_base", preview_rows=3)
+
+    # -------------------------------------------------------------------------
+    # Enrichissement + alignement
+    # -------------------------------------------------------------------------
+    features = _enrich_features(features)
+    features = _align_model_features(
+        features,
+        debug=debug,
+        keep_id=keep_id,
+    )
+
+    if normalized_client_ids is not None and keep_id and "SK_ID_CURR" in features.columns:
+        features = features[features["SK_ID_CURR"].isin(normalized_client_ids)].copy()
+
+    if debug:
+        _debug_title("FEATURES FINALES")
+        _debug_df(features, "features_finales", preview_rows=5)
+
+    return features
+
+
+# =============================================================================
+# Point d'entrée métier pour l'application
+# =============================================================================
+
+def build_model_ready_features(
+    *,
+    client_ids: Sequence[int] | None = None,
+    debug: bool = False,
+    keep_id: bool = False,
+) -> pd.DataFrame:
+    """
+    Point d'entrée métier pour obtenir les features prêtes pour le modèle.
+
+    Notes
+    -----
+    L'import du cache loader est volontairement local pour éviter
+    les imports circulaires au chargement des modules.
+    """
+    from app.services.data_loader_service import get_raw_data_cache
+
+    normalized_client_ids = _normalize_client_ids(client_ids)
+
+    if debug:
+        _debug_title("DÉMARRAGE FEATURE BUILDER")
+        print("[DEBUG] source de données : application_test.csv")
+        print(f"[DEBUG] keep_id : {keep_id}")
+        print(
+            "[DEBUG] client_ids fournis : "
+            f"{None if normalized_client_ids is None else len(normalized_client_ids)}"
+        )
+
+    raw_sources = get_raw_data_cache()
+
+    return build_features_from_loaded_data(
+        raw_sources=raw_sources,
+        client_ids=normalized_client_ids,
+        debug=debug,
+        keep_id=keep_id,
+    )
+
+
+def build_features_for_client(
+    client_id: int,
+    *,
+    debug: bool = False,
+    keep_id: bool = False,
+) -> dict[str, Any]:
+    """
+    Construit les features prêtes pour le modèle pour un seul client.
+    """
+    client_id = int(client_id)
+
+    df = build_model_ready_features(
+        client_ids=[client_id],
+        debug=debug,
+        keep_id=True,
+    )
+
+    if df.empty:
+        raise ValueError(f"Aucune feature construite pour le client {client_id}.")
+
+    if len(df) != 1:
+        raise ValueError(
+            f"Le feature builder a retourné {len(df)} lignes pour le client {client_id}, "
+            "alors qu'une seule était attendue."
+        )
+
+    row = df.iloc[0].to_dict()
+
+    if not keep_id:
+        row.pop("SK_ID_CURR", None)
+
+    return row

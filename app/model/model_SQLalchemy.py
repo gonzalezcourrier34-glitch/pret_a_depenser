@@ -21,6 +21,13 @@ Tables couvertes
 - EvaluationMetric
 - Alert
 
+Architecture
+------------
+Dans la version actuelle du projet :
+- les features sont construites directement depuis les CSV
+- PostgreSQL sert uniquement à stocker les logs de prédiction
+  et les données de monitoring
+
 Notes
 -----
 - Ce fichier est aligné avec les scripts SQL de création de tables PostgreSQL.
@@ -29,16 +36,20 @@ Notes
   gérer automatiquement l'horodatage.
 """
 
+from __future__ import annotations
+
 from sqlalchemy import (
+    BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
+    Index,
     Integer,
-    BigInteger,
     Text,
     UniqueConstraint,
-    Index,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
@@ -46,7 +57,10 @@ from sqlalchemy.sql import func
 from app.core.db import Base
 
 
+# =============================================================================
 # Tables de prédiction
+# =============================================================================
+
 class PredictionLog(Base):
     """
     Journal des prédictions réalisées par l'API.
@@ -57,7 +71,7 @@ class PredictionLog(Base):
     __tablename__ = "prediction_logs"
 
     id = Column(BigInteger, primary_key=True, index=True)
-    request_id = Column(Text, unique=True, nullable=True, index=True)
+    request_id = Column(Text, unique=True, nullable=False, index=True)
 
     client_id = Column(BigInteger, nullable=True, index=True)
 
@@ -84,7 +98,14 @@ class PredictionLog(Base):
     error_message = Column(Text, nullable=True)
 
     __table_args__ = (
+        CheckConstraint(
+            "prediction IN (0, 1)",
+            name="ck_prediction_logs_prediction_binary",
+        ),
+        Index("idx_prediction_logs_client_id", "client_id"),
         Index("idx_prediction_logs_model_version", "model_name", "model_version"),
+        Index("idx_prediction_logs_prediction_timestamp", "prediction_timestamp"),
+        Index("idx_prediction_logs_status_code", "status_code"),
     )
 
 
@@ -113,6 +134,16 @@ class GroundTruthLabel(Base):
     )
 
     notes = Column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "true_label IN (0, 1)",
+            name="ck_ground_truth_labels_true_label_binary",
+        ),
+        Index("idx_ground_truth_labels_request_id", "request_id"),
+        Index("idx_ground_truth_labels_client_id", "client_id"),
+        Index("idx_ground_truth_labels_observed_at", "observed_at"),
+    )
 
 
 class PredictionFeatureSnapshot(Base):
@@ -143,8 +174,23 @@ class PredictionFeatureSnapshot(Base):
         index=True,
     )
 
+    __table_args__ = (
+        Index("idx_prediction_features_snapshot_request_id", "request_id"),
+        Index("idx_prediction_features_snapshot_client_id", "client_id"),
+        Index(
+            "idx_prediction_features_snapshot_model_version",
+            "model_name",
+            "model_version",
+        ),
+        Index("idx_prediction_features_snapshot_feature_name", "feature_name"),
+        Index("idx_prediction_features_snapshot_timestamp", "snapshot_timestamp"),
+    )
 
+
+# =============================================================================
 # Tables de monitoring
+# =============================================================================
+
 class ModelRegistry(Base):
     """
     Registre des versions de modèles déployées ou historisées.
@@ -171,7 +217,12 @@ class ModelRegistry(Base):
 
     deployed_at = Column(DateTime(timezone=True), nullable=True)
 
-    is_active = Column(Boolean, nullable=False, default=False, server_default="false")
+    is_active = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
 
     created_at = Column(
         DateTime(timezone=True),
@@ -180,9 +231,18 @@ class ModelRegistry(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("model_name", "model_version", name="uq_model_registry_name_version"),
+        UniqueConstraint(
+            "model_name",
+            "model_version",
+            name="uq_model_registry_name_version",
+        ),
+        CheckConstraint(
+            "stage IN ('dev', 'staging', 'production', 'archived')",
+            name="ck_model_registry_stage_valid",
+        ),
         Index("idx_model_registry_name_version", "model_name", "model_version"),
         Index("idx_model_registry_active", "is_active"),
+        Index("idx_model_registry_stage", "stage"),
     )
 
 
@@ -216,6 +276,18 @@ class FeatureStoreMonitoring(Base):
         index=True,
     )
 
+    __table_args__ = (
+        Index("idx_feature_store_monitoring_request_id", "request_id"),
+        Index("idx_feature_store_monitoring_client_id", "client_id"),
+        Index(
+            "idx_feature_store_monitoring_model_version",
+            "model_name",
+            "model_version",
+        ),
+        Index("idx_feature_store_monitoring_feature_name", "feature_name"),
+        Index("idx_feature_store_monitoring_snapshot_timestamp", "snapshot_timestamp"),
+    )
+
 
 class DriftMetric(Base):
     """
@@ -244,7 +316,12 @@ class DriftMetric(Base):
     metric_value = Column(Float, nullable=False)
     threshold_value = Column(Float, nullable=True)
 
-    drift_detected = Column(Boolean, nullable=False, default=False, server_default="false")
+    drift_detected = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
 
     details = Column(JSONB, nullable=True)
 
@@ -257,7 +334,9 @@ class DriftMetric(Base):
 
     __table_args__ = (
         Index("idx_drift_metrics_model_version", "model_name", "model_version"),
+        Index("idx_drift_metrics_feature_name", "feature_name"),
         Index("idx_drift_metrics_detected", "drift_detected"),
+        Index("idx_drift_metrics_computed_at", "computed_at"),
     )
 
 
@@ -304,7 +383,29 @@ class EvaluationMetric(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "tn IS NULL OR tn >= 0",
+            name="ck_evaluation_metrics_tn_non_negative",
+        ),
+        CheckConstraint(
+            "fp IS NULL OR fp >= 0",
+            name="ck_evaluation_metrics_fp_non_negative",
+        ),
+        CheckConstraint(
+            "fn IS NULL OR fn >= 0",
+            name="ck_evaluation_metrics_fn_non_negative",
+        ),
+        CheckConstraint(
+            "tp IS NULL OR tp >= 0",
+            name="ck_evaluation_metrics_tp_non_negative",
+        ),
+        CheckConstraint(
+            "sample_size IS NULL OR sample_size >= 0",
+            name="ck_evaluation_metrics_sample_size_non_negative",
+        ),
         Index("idx_evaluation_metrics_model_version", "model_name", "model_version"),
+        Index("idx_evaluation_metrics_dataset_name", "dataset_name"),
+        Index("idx_evaluation_metrics_computed_at", "computed_at"),
     )
 
 
@@ -332,7 +433,13 @@ class Alert(Base):
 
     context = Column(JSONB, nullable=True)
 
-    status = Column(Text, nullable=False, default="open", server_default="open", index=True)
+    status = Column(
+        Text,
+        nullable=False,
+        default="open",
+        server_default=text("'open'"),
+        index=True,
+    )
 
     created_at = Column(
         DateTime(timezone=True),
@@ -343,3 +450,18 @@ class Alert(Base):
 
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "severity IN ('low', 'medium', 'high', 'critical')",
+            name="ck_alerts_severity_valid",
+        ),
+        CheckConstraint(
+            "status IN ('open', 'acknowledged', 'resolved')",
+            name="ck_alerts_status_valid",
+        ),
+        Index("idx_alerts_status", "status"),
+        Index("idx_alerts_severity", "severity"),
+        Index("idx_alerts_created_at", "created_at"),
+        Index("idx_alerts_model_version", "model_name", "model_version"),
+    )

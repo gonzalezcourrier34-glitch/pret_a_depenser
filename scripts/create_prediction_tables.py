@@ -1,17 +1,23 @@
 """
-Script de création des tables de prédiction PostgreSQL.
+Script de création des tables PostgreSQL de prédiction.
 
-Ce module crée les tables liées aux inférences réalisées par l'API
-de scoring crédit.
+Ce module crée les tables utilisées pour journaliser les inférences
+réalisées par l'API de scoring crédit.
 
 Objectif
 --------
 Mettre en place une couche de persistance dédiée aux prédictions afin de :
 - tracer chaque appel de l'API
 - stocker les scores et classes prédites
-- conserver les données d'entrée et de sortie
+- conserver les entrées et sorties de l'inférence
 - préparer le suivi des vérités terrain
-- historiser les features observées au moment de l'inférence
+- historiser les features observées au moment de la prédiction
+
+Architecture
+------------
+Dans la version actuelle du projet :
+- les features sont construites directement depuis les CSV
+- PostgreSQL sert uniquement à stocker les logs et le monitoring
 
 Tables créées
 -------------
@@ -25,6 +31,8 @@ Notes
 - Ce script est conçu pour PostgreSQL.
 - Les colonnes JSONB permettent de stocker des structures souples.
 """
+
+from __future__ import annotations
 
 import os
 
@@ -56,11 +64,11 @@ if not DATABASE_URL:
 CREATE_PREDICTION_LOGS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS prediction_logs (
     id BIGSERIAL PRIMARY KEY,
-    request_id TEXT UNIQUE,
+    request_id TEXT NOT NULL UNIQUE,
     client_id BIGINT,
     model_name TEXT NOT NULL,
     model_version TEXT NOT NULL,
-    prediction INTEGER NOT NULL,
+    prediction INTEGER NOT NULL CHECK (prediction IN (0, 1)),
     score DOUBLE PRECISION NOT NULL,
     threshold_used DOUBLE PRECISION,
     latency_ms DOUBLE PRECISION,
@@ -77,7 +85,7 @@ CREATE TABLE IF NOT EXISTS ground_truth_labels (
     id BIGSERIAL PRIMARY KEY,
     request_id TEXT,
     client_id BIGINT,
-    true_label INTEGER NOT NULL,
+    true_label INTEGER NOT NULL CHECK (true_label IN (0, 1)),
     label_source TEXT,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     notes TEXT
@@ -104,30 +112,67 @@ CREATE TABLE IF NOT EXISTS prediction_features_snapshot (
 # =============================================================================
 
 CREATE_INDEXES_SQL = [
-    'CREATE INDEX IF NOT EXISTS idx_prediction_logs_client_id ON prediction_logs(client_id);',
-    'CREATE INDEX IF NOT EXISTS idx_prediction_logs_model_version ON prediction_logs(model_name, model_version);',
-    'CREATE INDEX IF NOT EXISTS idx_prediction_logs_timestamp ON prediction_logs(prediction_timestamp);',
+    # prediction_logs
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_logs_client_id
+    ON prediction_logs(client_id);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_logs_model_version
+    ON prediction_logs(model_name, model_version);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_logs_prediction_timestamp
+    ON prediction_logs(prediction_timestamp);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_logs_status_code
+    ON prediction_logs(status_code);
+    """,
 
-    'CREATE INDEX IF NOT EXISTS idx_ground_truth_request_id ON ground_truth_labels(request_id);',
-    'CREATE INDEX IF NOT EXISTS idx_ground_truth_client_id ON ground_truth_labels(client_id);',
-    'CREATE INDEX IF NOT EXISTS idx_ground_truth_observed_at ON ground_truth_labels(observed_at);',
+    # ground_truth_labels
+    """
+    CREATE INDEX IF NOT EXISTS idx_ground_truth_labels_request_id
+    ON ground_truth_labels(request_id);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_ground_truth_labels_client_id
+    ON ground_truth_labels(client_id);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_ground_truth_labels_observed_at
+    ON ground_truth_labels(observed_at);
+    """,
 
-    'CREATE INDEX IF NOT EXISTS idx_prediction_features_request_id ON prediction_features_snapshot(request_id);',
-    'CREATE INDEX IF NOT EXISTS idx_prediction_features_client_id ON prediction_features_snapshot(client_id);',
-    'CREATE INDEX IF NOT EXISTS idx_prediction_features_feature_name ON prediction_features_snapshot(feature_name);',
-    'CREATE INDEX IF NOT EXISTS idx_prediction_features_snapshot_timestamp ON prediction_features_snapshot(snapshot_timestamp);',
+    # prediction_features_snapshot
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_features_snapshot_request_id
+    ON prediction_features_snapshot(request_id);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_features_snapshot_client_id
+    ON prediction_features_snapshot(client_id);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_features_snapshot_feature_name
+    ON prediction_features_snapshot(feature_name);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_features_snapshot_timestamp
+    ON prediction_features_snapshot(snapshot_timestamp);
+    """,
 ]
 
 
 # =============================================================================
-# Fonctions de création des tables
+# Fonctions de création
 # =============================================================================
 
 def create_prediction_logs_table(engine) -> None:
     """
     Crée la table `prediction_logs`.
 
-    Cette table journalise chaque prédiction faite par l'API,
+    Cette table journalise chaque prédiction faite par l'API
     avec les entrées, sorties, scores et métadonnées techniques.
 
     Parameters
@@ -145,7 +190,7 @@ def create_ground_truth_labels_table(engine) -> None:
     """
     Crée la table `ground_truth_labels`.
 
-    Cette table stocke les vérités terrain observées après coup,
+    Cette table stocke les vérités terrain observées après coup
     afin de comparer les prédictions aux résultats réels.
 
     Parameters
@@ -164,7 +209,8 @@ def create_prediction_features_snapshot_table(engine) -> None:
     Crée la table `prediction_features_snapshot`.
 
     Cette table stocke les features observées au moment de l'inférence,
-    une ligne par feature, afin de faciliter l'analyse de dérive.
+    une ligne par feature, afin de faciliter l'analyse de dérive
+    et les audits.
 
     Parameters
     ----------
@@ -205,6 +251,21 @@ TABLE_CREATORS = [
 ]
 
 
+def create_prediction_tables(engine) -> None:
+    """
+    Crée l'ensemble des tables et index liés aux prédictions.
+
+    Parameters
+    ----------
+    engine :
+        Moteur SQLAlchemy connecté à PostgreSQL.
+    """
+    for create_table in TABLE_CREATORS:
+        create_table(engine)
+
+    create_indexes(engine)
+
+
 def main() -> None:
     """
     Point d'entrée du script.
@@ -213,16 +274,13 @@ def main() -> None:
     1. établit la connexion à PostgreSQL,
     2. crée les tables de prédiction,
     3. crée les index,
-    4. affiche un message de confirmation.
+    4. affiche un message final.
     """
     print("Connexion à PostgreSQL...")
     engine = create_engine(DATABASE_URL, echo=False)
     print("Connexion établie.")
 
-    for create_table in TABLE_CREATORS:
-        create_table(engine)
-
-    create_indexes(engine)
+    create_prediction_tables(engine)
 
     print("Création des tables de prédiction terminée.")
 

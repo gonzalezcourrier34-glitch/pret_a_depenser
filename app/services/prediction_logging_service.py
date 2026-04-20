@@ -1,0 +1,455 @@
+"""
+Service de journalisation des prédictions et snapshots de features.
+
+Ce module centralise l'orchestration métier des événements liés à l'inférence :
+- log principal de prédiction dans `prediction_logs`
+- snapshot détaillé des features dans `prediction_features_snapshot`
+- alimentation optionnelle de `feature_store_monitoring`
+
+Objectif
+--------
+Séparer la logique métier de journalisation de la couche CRUD
+afin de garder des routes et services lisibles.
+
+Notes
+-----
+- Les commits peuvent être laissés à l'appelant pour garder le contrôle
+  transactionnel.
+- En cas d'erreur de prédiction, la ligne est tout de même journalisée
+  avec `prediction=0`, `score=0.0` et un `error_message` renseigné.
+"""
+
+from __future__ import annotations
+
+import math
+from datetime import datetime, timezone
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from sqlalchemy.orm import Session
+
+from app.crud import prediction as prediction_crud
+from app.model.model_SQLalchemy import PredictionLog
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+def _utc_now() -> datetime:
+    """
+    Retourne l'heure actuelle en UTC.
+
+    Returns
+    -------
+    datetime
+        Horodatage timezone-aware.
+    """
+    return datetime.now(timezone.utc)
+
+
+def _is_missing(value: Any) -> bool:
+    """
+    Indique si une valeur doit être considérée comme manquante.
+
+    Parameters
+    ----------
+    value : Any
+        Valeur à tester.
+
+    Returns
+    -------
+    bool
+        True si la valeur est manquante, sinon False.
+    """
+    if value is None:
+        return True
+
+    try:
+        return bool(pd.isna(value))
+    except Exception:
+        return False
+
+
+def _to_python_scalar(value: Any) -> Any:
+    """
+    Convertit une valeur pandas / NumPy vers un type Python natif.
+
+    Parameters
+    ----------
+    value : Any
+        Valeur source.
+
+    Returns
+    -------
+    Any
+        Valeur convertie.
+    """
+    if _is_missing(value):
+        return None
+
+    if isinstance(value, np.generic):
+        return value.item()
+
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+
+    return value
+
+
+def _to_json_compatible(value: Any) -> Any:
+    """
+    Rend une structure compatible JSON / JSONB.
+
+    Parameters
+    ----------
+    value : Any
+        Valeur ou structure à convertir.
+
+    Returns
+    -------
+    Any
+        Structure compatible JSON.
+    """
+    value = _to_python_scalar(value)
+
+    if value is None:
+        return None
+
+    if isinstance(value, dict):
+        return {str(k): _to_json_compatible(v) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_compatible(v) for v in value]
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    return value
+
+
+def dataframe_row_to_feature_records(
+    features_df: pd.DataFrame,
+    *,
+    request_id: str,
+    model_name: str,
+    model_version: str,
+    client_id: int | None = None,
+    source_table: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Convertit une ligne de DataFrame en liste d'enregistrements feature.
+
+    Parameters
+    ----------
+    features_df : pd.DataFrame
+        DataFrame contenant exactement une ligne de features.
+    request_id : str
+        Identifiant unique de requête.
+    model_name : str
+        Nom du modèle.
+    model_version : str
+        Version du modèle.
+    client_id : int | None, optional
+        Identifiant client.
+    source_table : str | None, optional
+        Table ou source logique éventuelle.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Liste de dictionnaires, une entrée par feature.
+
+    Raises
+    ------
+    TypeError
+        Si `features_df` n'est pas un DataFrame pandas.
+    ValueError
+        Si le DataFrame ne contient pas exactement une ligne.
+    """
+    if not isinstance(features_df, pd.DataFrame):
+        raise TypeError("`features_df` doit être un DataFrame pandas.")
+
+    if len(features_df) != 1:
+        raise ValueError(
+            "Le DataFrame de features doit contenir exactement une ligne. "
+            f"Nombre de lignes reçu : {len(features_df)}"
+        )
+
+    row = features_df.iloc[0].to_dict()
+    records: list[dict[str, Any]] = []
+
+    for feature_name, raw_value in row.items():
+        value = _to_python_scalar(raw_value)
+
+        records.append(
+            {
+                "request_id": request_id,
+                "client_id": client_id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "feature_name": str(feature_name),
+                "feature_value": None if value is None else str(value),
+                "feature_type": type(value).__name__ if value is not None else None,
+                "source_table": source_table,
+            }
+        )
+
+    return records
+
+
+# =============================================================================
+# Service principal
+# =============================================================================
+
+class PredictionLoggingService:
+    """
+    Service applicatif de journalisation des inférences.
+
+    Parameters
+    ----------
+    db : Session
+        Session SQLAlchemy active.
+    """
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def log_prediction(
+        self,
+        *,
+        request_id: str,
+        model_name: str,
+        model_version: str,
+        prediction: int,
+        score: float,
+        threshold_used: float | None,
+        latency_ms: float | None,
+        input_data: dict[str, Any] | None,
+        output_data: dict[str, Any] | None,
+        client_id: int | None = None,
+        status_code: int | None = 200,
+        error_message: str | None = None,
+        event_time: datetime | None = None,
+    ) -> PredictionLog:
+        """
+        Crée un log principal de prédiction.
+
+        Returns
+        -------
+        PredictionLog
+            Entité SQLAlchemy ajoutée à la session.
+        """
+        event_time = event_time or _utc_now()
+
+        safe_input_data = _to_json_compatible(input_data)
+        if safe_input_data is None:
+            safe_input_data = {}
+
+        return prediction_crud.create_prediction_log(
+            self.db,
+            request_id=request_id,
+            client_id=client_id,
+            model_name=model_name,
+            model_version=model_version,
+            prediction=int(prediction),
+            score=float(score),
+            threshold_used=None if threshold_used is None else float(threshold_used),
+            latency_ms=None if latency_ms is None else float(latency_ms),
+            input_data=safe_input_data,
+            output_data=_to_json_compatible(output_data),
+            prediction_timestamp=event_time,
+            status_code=status_code,
+            error_message=error_message,
+        )
+
+    def log_prediction_error(
+        self,
+        *,
+        request_id: str,
+        model_name: str,
+        model_version: str,
+        input_data: dict[str, Any] | None,
+        error_message: str,
+        client_id: int | None = None,
+        status_code: int | None = 500,
+        latency_ms: float | None = None,
+        event_time: datetime | None = None,
+    ) -> PredictionLog:
+        """
+        Crée un log d'erreur de prédiction.
+
+        Notes
+        -----
+        La ligne reste compatible avec la contrainte SQL sur `prediction`
+        en utilisant `prediction=0` comme valeur technique de repli.
+
+        Returns
+        -------
+        PredictionLog
+            Entité SQLAlchemy ajoutée à la session.
+        """
+        return self.log_prediction(
+            request_id=request_id,
+            model_name=model_name,
+            model_version=model_version,
+            prediction=0,
+            score=0.0,
+            threshold_used=None,
+            latency_ms=latency_ms,
+            input_data=input_data,
+            output_data={"status": "error", "message": error_message},
+            client_id=client_id,
+            status_code=status_code,
+            error_message=error_message,
+            event_time=event_time,
+        )
+
+    def log_prediction_features_snapshot(
+        self,
+        feature_records: list[dict[str, Any]],
+        *,
+        event_time: datetime | None = None,
+    ) -> None:
+        """
+        Enregistre un snapshot détaillé des features de prédiction.
+        """
+        if not feature_records:
+            raise ValueError(
+                "Aucun feature record à insérer dans prediction_features_snapshot."
+            )
+
+        event_time = event_time or _utc_now()
+
+        prediction_crud.create_feature_snapshots(
+            self.db,
+            records=feature_records,
+            timestamp=event_time,
+        )
+
+    def log_feature_store_monitoring(
+        self,
+        feature_records: list[dict[str, Any]],
+        *,
+        event_time: datetime | None = None,
+    ) -> None:
+        """
+        Enregistre les features dans la table de monitoring.
+        """
+        if not feature_records:
+            raise ValueError(
+                "Aucun feature record à insérer dans feature_store_monitoring."
+            )
+
+        event_time = event_time or _utc_now()
+
+        prediction_crud.create_feature_store_records(
+            self.db,
+            records=feature_records,
+            timestamp=event_time,
+        )
+
+    def log_full_prediction_event(
+        self,
+        *,
+        request_id: str,
+        model_name: str,
+        model_version: str,
+        features_df: pd.DataFrame,
+        raw_input_data: dict[str, Any] | None,
+        prediction: int,
+        score: float,
+        threshold_used: float | None,
+        latency_ms: float | None,
+        client_id: int | None = None,
+        write_feature_store_monitoring: bool = True,
+        source_table: str | None = None,
+        output_data: dict[str, Any] | None = None,
+        status_code: int | None = 200,
+    ) -> None:
+        """
+        Orchestration complète de journalisation d'une prédiction réussie.
+        """
+        if not isinstance(features_df, pd.DataFrame):
+            raise TypeError("`features_df` doit être un DataFrame pandas.")
+
+        if len(features_df) != 1:
+            raise ValueError(
+                "Le DataFrame de features doit contenir exactement une ligne dans "
+                f"log_full_prediction_event. Reçu : {len(features_df)} lignes."
+            )
+
+        event_time = _utc_now()
+
+        feature_records = dataframe_row_to_feature_records(
+            features_df,
+            request_id=request_id,
+            model_name=model_name,
+            model_version=model_version,
+            client_id=client_id,
+            source_table=source_table,
+        )
+
+        self.log_prediction_features_snapshot(
+            feature_records,
+            event_time=event_time,
+        )
+
+        if write_feature_store_monitoring:
+            self.log_feature_store_monitoring(
+                feature_records,
+                event_time=event_time,
+            )
+
+        final_output = output_data or {
+            "request_id": request_id,
+            "prediction": int(prediction),
+            "score": float(score),
+            "threshold_used": None if threshold_used is None else float(threshold_used),
+            "model_name": model_name,
+            "model_version": model_version,
+            "latency_ms": None if latency_ms is None else float(latency_ms),
+        }
+
+        self.log_prediction(
+            request_id=request_id,
+            model_name=model_name,
+            model_version=model_version,
+            prediction=prediction,
+            score=score,
+            threshold_used=threshold_used,
+            latency_ms=latency_ms,
+            input_data=raw_input_data,
+            output_data=final_output,
+            client_id=client_id,
+            status_code=status_code,
+            error_message=None,
+            event_time=event_time,
+        )
+
+    def commit(self) -> None:
+        """
+        Valide la transaction courante.
+
+        Notes
+        -----
+        Un `flush()` explicite est effectué avant commit afin de faire
+        remonter les erreurs SQL le plus tôt possible.
+        """
+        try:
+            self.db.flush()
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def rollback(self) -> None:
+        """
+        Annule la transaction courante.
+        """
+        self.db.rollback()

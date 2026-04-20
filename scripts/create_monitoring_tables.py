@@ -1,17 +1,24 @@
 """
-Script de création des tables de monitoring PostgreSQL.
+Script de création des tables PostgreSQL de monitoring.
 
-Ce module crée les tables de monitoring utilisées pour suivre
-un modèle de machine learning en production.
+Ce module crée les tables utilisées pour suivre un modèle
+de machine learning en production.
 
 Objectif
 --------
 Mettre en place une couche de monitoring structurée afin de :
 - suivre les versions de modèles déployées
-- conserver les snapshots de features
+- conserver les snapshots de features observées
 - stocker les métriques de dérive
 - historiser les métriques de performance
 - centraliser les alertes
+
+Architecture
+------------
+Dans la version actuelle du projet :
+- les features sont construites directement depuis les CSV
+- PostgreSQL sert uniquement à stocker les logs de prédiction
+  et les données de monitoring
 
 Tables créées
 -------------
@@ -25,8 +32,10 @@ Notes
 -----
 - Les tables sont créées avec `CREATE TABLE IF NOT EXISTS`.
 - Ce script est conçu pour PostgreSQL.
-- Les colonnes JSONB sont utilisées pour stocker des structures souples.
+- Les colonnes JSONB permettent de stocker des structures souples.
 """
+
+from __future__ import annotations
 
 import os
 
@@ -60,7 +69,7 @@ CREATE TABLE IF NOT EXISTS model_registry (
     id BIGSERIAL PRIMARY KEY,
     model_name TEXT NOT NULL,
     model_version TEXT NOT NULL,
-    stage TEXT NOT NULL,
+    stage TEXT NOT NULL CHECK (stage IN ('dev', 'staging', 'production', 'archived')),
     run_id TEXT,
     source_path TEXT,
     training_data_version TEXT,
@@ -123,11 +132,11 @@ CREATE TABLE IF NOT EXISTS evaluation_metrics (
     f1_score DOUBLE PRECISION,
     fbeta_score DOUBLE PRECISION,
     business_cost DOUBLE PRECISION,
-    tn INTEGER,
-    fp INTEGER,
-    fn INTEGER,
-    tp INTEGER,
-    sample_size INTEGER,
+    tn INTEGER CHECK (tn IS NULL OR tn >= 0),
+    fp INTEGER CHECK (fp IS NULL OR fp >= 0),
+    fn INTEGER CHECK (fn IS NULL OR fn >= 0),
+    tp INTEGER CHECK (tp IS NULL OR tp >= 0),
+    sample_size INTEGER CHECK (sample_size IS NULL OR sample_size >= 0),
     computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 """
@@ -136,14 +145,15 @@ CREATE_ALERTS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS alerts (
     id BIGSERIAL PRIMARY KEY,
     alert_type TEXT NOT NULL,
-    severity TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high', 'critical')),
     model_name TEXT,
     model_version TEXT,
     feature_name TEXT,
     title TEXT NOT NULL,
     message TEXT NOT NULL,
     context JSONB,
-    status TEXT NOT NULL DEFAULT 'open',
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'acknowledged', 'resolved')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     acknowledged_at TIMESTAMPTZ,
     resolved_at TIMESTAMPTZ
@@ -156,26 +166,83 @@ CREATE TABLE IF NOT EXISTS alerts (
 # =============================================================================
 
 CREATE_INDEXES_SQL = [
-    'CREATE INDEX IF NOT EXISTS idx_model_registry_name_version ON model_registry(model_name, model_version);',
-    'CREATE INDEX IF NOT EXISTS idx_model_registry_active ON model_registry(is_active);',
+    # model_registry
+    """
+    CREATE INDEX IF NOT EXISTS idx_model_registry_name_version
+    ON model_registry(model_name, model_version);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_model_registry_active
+    ON model_registry(is_active);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_model_registry_stage
+    ON model_registry(stage);
+    """,
 
-    'CREATE INDEX IF NOT EXISTS idx_feature_store_request_id ON feature_store_monitoring(request_id);',
-    'CREATE INDEX IF NOT EXISTS idx_feature_store_client_id ON feature_store_monitoring(client_id);',
-    'CREATE INDEX IF NOT EXISTS idx_feature_store_feature_name ON feature_store_monitoring(feature_name);',
-    'CREATE INDEX IF NOT EXISTS idx_feature_store_snapshot_timestamp ON feature_store_monitoring(snapshot_timestamp);',
+    # feature_store_monitoring
+    """
+    CREATE INDEX IF NOT EXISTS idx_feature_store_monitoring_request_id
+    ON feature_store_monitoring(request_id);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_feature_store_monitoring_client_id
+    ON feature_store_monitoring(client_id);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_feature_store_monitoring_feature_name
+    ON feature_store_monitoring(feature_name);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_feature_store_monitoring_snapshot_timestamp
+    ON feature_store_monitoring(snapshot_timestamp);
+    """,
 
-    'CREATE INDEX IF NOT EXISTS idx_drift_metrics_model_version ON drift_metrics(model_name, model_version);',
-    'CREATE INDEX IF NOT EXISTS idx_drift_metrics_feature_name ON drift_metrics(feature_name);',
-    'CREATE INDEX IF NOT EXISTS idx_drift_metrics_detected ON drift_metrics(drift_detected);',
-    'CREATE INDEX IF NOT EXISTS idx_drift_metrics_computed_at ON drift_metrics(computed_at);',
+    # drift_metrics
+    """
+    CREATE INDEX IF NOT EXISTS idx_drift_metrics_model_version
+    ON drift_metrics(model_name, model_version);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_drift_metrics_feature_name
+    ON drift_metrics(feature_name);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_drift_metrics_detected
+    ON drift_metrics(drift_detected);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_drift_metrics_computed_at
+    ON drift_metrics(computed_at);
+    """,
 
-    'CREATE INDEX IF NOT EXISTS idx_evaluation_metrics_model_version ON evaluation_metrics(model_name, model_version);',
-    'CREATE INDEX IF NOT EXISTS idx_evaluation_metrics_dataset_name ON evaluation_metrics(dataset_name);',
-    'CREATE INDEX IF NOT EXISTS idx_evaluation_metrics_computed_at ON evaluation_metrics(computed_at);',
+    # evaluation_metrics
+    """
+    CREATE INDEX IF NOT EXISTS idx_evaluation_metrics_model_version
+    ON evaluation_metrics(model_name, model_version);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_evaluation_metrics_dataset_name
+    ON evaluation_metrics(dataset_name);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_evaluation_metrics_computed_at
+    ON evaluation_metrics(computed_at);
+    """,
 
-    'CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);',
-    'CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity);',
-    'CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts(created_at);'
+    # alerts
+    """
+    CREATE INDEX IF NOT EXISTS idx_alerts_status
+    ON alerts(status);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_alerts_severity
+    ON alerts(severity);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_alerts_created_at
+    ON alerts(created_at);
+    """
 ]
 
 
@@ -302,6 +369,21 @@ TABLE_CREATORS = [
 ]
 
 
+def create_monitoring_tables(engine) -> None:
+    """
+    Crée l'ensemble des tables et index liés au monitoring.
+
+    Parameters
+    ----------
+    engine :
+        Moteur SQLAlchemy connecté à PostgreSQL.
+    """
+    for create_table in TABLE_CREATORS:
+        create_table(engine)
+
+    create_indexes(engine)
+
+
 def main() -> None:
     """
     Point d'entrée du script.
@@ -310,16 +392,13 @@ def main() -> None:
     1. établit la connexion à PostgreSQL,
     2. crée les tables de monitoring,
     3. crée les index,
-    4. affiche un message de confirmation.
+    4. affiche un message final.
     """
     print("Connexion à PostgreSQL...")
     engine = create_engine(DATABASE_URL, echo=False)
     print("Connexion établie.")
 
-    for create_table in TABLE_CREATORS:
-        create_table(engine)
-
-    create_indexes(engine)
+    create_monitoring_tables(engine)
 
     print("Création des tables de monitoring terminée.")
 

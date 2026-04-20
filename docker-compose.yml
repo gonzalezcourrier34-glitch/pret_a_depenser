@@ -3,6 +3,8 @@ services:
     image: postgres:16
     container_name: postgres_credit_api
     restart: always
+    env_file:
+      - .env
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -24,12 +26,20 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/credit_api
-      MODEL_PATH: artifacts/model.joblib
+      MODEL_PATH: /app/artifacts/model.joblib
       MODEL_VERSION: v1
+      SIMULATION_SOURCE_CSV: /app/data/application_test.csv
+      DATA_PATH: /app/data
     ports:
       - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./app:/app/app
 
   dashboard:
     build: .
@@ -40,15 +50,26 @@ services:
         condition: service_healthy
       api:
         condition: service_started
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/credit_api
       API_URL: http://api:8000
-      API_KEY: ""
       FEATURES_TABLE: features_client_test_enriched
       DEFAULT_LIMIT: 200
-    command: ["uv", "run", "streamlit", "run", "dashboard/dashboard_main.py", "--server.address=0.0.0.0", "--server.port=8501"]
+      DATA_PATH: /app/data
+    command:
+      [
+        "uv", "run", "streamlit", "run",
+        "dashboard/dashboard_main.py",
+        "--server.address=0.0.0.0",
+        "--server.port=8501"
+      ]
     ports:
       - "8501:8501"
+    volumes:
+      - ./dashboard:/app/dashboard
+      - ./artifacts:/app/artifacts
 
 volumes:
   postgres_data:

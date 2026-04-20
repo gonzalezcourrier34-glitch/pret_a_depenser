@@ -9,10 +9,16 @@ Architecture
 ------------
 - app.core.config : configuration
 - app.core.db : connexion base de données
-- app.api : routes FastAPI
+- app.api.routes : routes FastAPI
 - app.services : logique métier
 - app.crud : persistance PostgreSQL
 - app.model : modèles SQLAlchemy
+
+Architecture actuelle
+---------------------
+- les données de prédiction proviennent exclusivement de `application_test.csv`
+- le modèle et le seuil sont chargés au démarrage
+- PostgreSQL sert uniquement au logging et au monitoring
 """
 
 from __future__ import annotations
@@ -21,19 +27,45 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 
-from app.api.routes_predict import router as predict_router
-from app.core.config import DEBUG
+from app.api.route_history import router as history_router
+from app.api.route_monitoring import router as monitoring_router
+from app.api.route_predict import router as predict_router
+from app.core.config import APPLICATION_TEST_CSV, DEBUG
 from app.core.db import SessionLocal
-from app.services.model_loader import get_model, get_threshold
+from app.services.data_loader_service import init_full_data_cache
+from app.services.model_loader_service import get_model, get_threshold
 
-from fastapi.responses import RedirectResponse
+
 # =============================================================================
 # Chargement des variables d'environnement
 # =============================================================================
 
 load_dotenv()
+
+
+# =============================================================================
+# Documentation OpenAPI
+# =============================================================================
+
+OPENAPI_TAGS = [
+    {
+        "name": "Predict",
+        "description": "Endpoints de prédiction du risque de défaut.",
+    },
+    {
+        "name": "History",
+        "description": (
+            "Consultation de l'historique des prédictions, labels et features."
+        ),
+    },
+    {
+        "name": "Monitoring",
+        "description": "Suivi du modèle, alertes, synthèses et état du monitoring.",
+    },
+]
 
 
 # =============================================================================
@@ -55,27 +87,40 @@ async def lifespan(app: FastAPI):
     - l'accès au modèle de scoring
     - le chargement du seuil métier
     - la disponibilité minimale de la base PostgreSQL
+    - le chargement en mémoire des données CSV métier
     """
     # -------------------------------------------------------------------------
     # STARTUP
     # -------------------------------------------------------------------------
-    # Vérification du chargement du modèle et du seuil
+    print("[APP] Démarrage de l'application...")
 
+    # Vérification du chargement du modèle
     get_model()
-    get_threshold()
+    print("[APP] Modèle chargé.")
 
+    # Vérification du chargement du seuil
+    get_threshold()
+    print("[APP] Seuil chargé.")
+
+    # Vérification minimale de la base PostgreSQL
     db = SessionLocal()
     try:
         db.execute(text("SELECT 1"))
+        print("[APP] Connexion PostgreSQL OK.")
     finally:
         db.close()
+
+    # Chargement des données CSV en mémoire
+    print(f"[APP] Chargement du cache métier depuis : {APPLICATION_TEST_CSV}")
+    init_full_data_cache(debug=False)
+    print("[APP] Cache CSV initialisé.")
 
     yield
 
     # -------------------------------------------------------------------------
     # SHUTDOWN
     # -------------------------------------------------------------------------
-    # Aucun nettoyage spécifique nécessaire ici pour le moment.
+    print("[APP] Arrêt de l'application.")
 
 
 # =============================================================================
@@ -84,10 +129,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="API de scoring crédit",
-    description="API de prédiction du risque de défaut avec journalisation PostgreSQL.",
+    description=(
+        "API de prédiction du risque de défaut avec journalisation "
+        "PostgreSQL et endpoints de monitoring."
+    ),
     version="1.0.0",
     debug=DEBUG,
     lifespan=lifespan,
+    openapi_tags=OPENAPI_TAGS,
 )
 
 
@@ -98,12 +147,12 @@ app = FastAPI(
 @app.get("/", include_in_schema=False)
 def root():
     """
-    Endpoint racine de vérification.
+    Redirige vers la documentation interactive de l'API.
 
     Returns
     -------
-    dict[str, str]
-        Message simple indiquant que l'API fonctionne.
+    RedirectResponse
+        Redirection HTTP vers `/docs`.
     """
     return RedirectResponse(url="/docs")
 
@@ -113,3 +162,5 @@ def root():
 # =============================================================================
 
 app.include_router(predict_router)
+app.include_router(history_router)
+app.include_router(monitoring_router)
