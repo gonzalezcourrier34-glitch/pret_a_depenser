@@ -14,7 +14,7 @@ afin de garder des routes fines et lisibles.
 
 Notes
 -----
-- La lecture des fichiers / caches passe par data_loader_service.
+- La lecture des fichiers / caches passe par data_loading_service.
 - L'écriture en base passe par MonitoringService.
 - Ce service orchestre donc la chaîne complète Evidently.
 """
@@ -29,7 +29,7 @@ from typing import Any, Literal
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from app.services.data_loader_service import (
+from app.services.loader_services.data_loading_service import (
     get_features_ready_cache,
     get_input_feature_names,
     get_raw_data_cache,
@@ -39,7 +39,7 @@ from app.services.data_loader_service import (
     init_monitoring_reference_cache,
 )
 from app.services.monitoring_service import MonitoringService
-
+from app.core.config import MONITORING_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +230,7 @@ class EvidentlyService:
         reference_kind: Literal["raw", "transformed"],
     ) -> pd.DataFrame:
         """
-        Charge le DataFrame de référence via data_loader_service.
+        Charge le DataFrame de référence via data_loading_service.
         """
         if reference_kind == "raw":
             return get_reference_features_raw_df()
@@ -243,7 +243,7 @@ class EvidentlyService:
         current_kind: Literal["raw", "transformed"],
     ) -> pd.DataFrame:
         """
-        Charge le DataFrame courant via data_loader_service.
+        Charge le DataFrame courant via data_loading_service.
         """
         if current_kind == "raw":
             raw_cache = get_raw_data_cache()
@@ -588,7 +588,7 @@ class EvidentlyService:
         )
 
         if monitoring_dir:
-            init_monitoring_reference_cache(Path(monitoring_dir))
+            init_monitoring_reference_cache(MONITORING_DIR)
         else:
             init_monitoring_reference_cache()
 
@@ -750,7 +750,7 @@ class EvidentlyService:
         reference_window_end: object = None,
         current_window_start: object = None,
         current_window_end: object = None,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         """
         Exécute une analyse de drift Evidently à partir de deux DataFrames déjà
         construits, puis persiste les métriques dans la base.
@@ -764,8 +764,12 @@ class EvidentlyService:
                     "event": "evidently_analysis_from_dataframes_start",
                     "model_name": model_name,
                     "model_version": resolved_model_version,
-                    "reference_rows": len(reference_df) if isinstance(reference_df, pd.DataFrame) else None,
-                    "current_rows": len(current_df) if isinstance(current_df, pd.DataFrame) else None,
+                    "reference_rows": len(reference_df)
+                    if isinstance(reference_df, pd.DataFrame)
+                    else None,
+                    "current_rows": len(current_df)
+                    if isinstance(current_df, pd.DataFrame)
+                    else None,
                     "feature_names_count": len(feature_names) if feature_names else 0,
                     "save_html_path": save_html_path,
                 }

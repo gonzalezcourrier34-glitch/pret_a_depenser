@@ -514,7 +514,7 @@ class PredictionFeaturesSnapshotResponse(StrictSchema):
     model_version: str | None = None
     snapshot_timestamp: datetime | None = None
     feature_count: int
-    features: list[PredictionFeatureSnapshotItemResponse]
+    items: list[PredictionFeatureSnapshotItemResponse]
 
 
 # =============================================================================
@@ -630,3 +630,47 @@ class EvidentlyRunResponse(StrictSchema):
     current_rows: int
     analyzed_columns: list[str]
     report: dict[str, Any] | None = None
+
+# =============================================================================
+# Evaluation
+# =============================================================================
+
+class MonitoringEvaluationRunResponse(StrictSchema):
+    success: bool
+    message: str
+    model_name: str
+    model_version: str
+    dataset_name: str
+    logged_metrics: int
+    sample_size: int
+    matched_rows: int
+    threshold_used: float | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+class GroundTruthCreateRequest(StrictSchema):
+    """
+    Payload d'ajout d'une vérité terrain.
+    """
+
+    request_id: str
+    client_id: int | None = None
+    true_label: Literal[0, 1]
+    label_source: str | None = None
+    observed_at: datetime | None = None
+    notes: str | None = None
+
+
+class GroundTruthCreateResponse(StrictSchema):
+    """
+    Réponse renvoyée après création d'une vérité terrain.
+    """
+
+    id: int
+    request_id: str | None = None
+    client_id: int | None = None
+    true_label: int
+    label_source: str | None = None
+    observed_at: datetime
+    notes: str | None = None

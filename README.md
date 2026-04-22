@@ -439,6 +439,54 @@ Centralise les alertes générées par les règles de drift, de performance ou d
 <hr>
 
 <h2 id="section-12">12. Structure du projet</h2>
+<pre><code>project/
+app/
+├── api/
+│   ├── route_prediction.py
+│   ├── route_history.py
+│   ├── route_monitoring.py
+│   └── route_analyse.py
+│
+├── core/
+│   ├── config.py
+│   ├── db.py
+│   ├── logging_config.py
+│   ├── model_features.py
+│   ├── schemas.py
+│   └── security.py
+│
+├── crud/
+│   ├── monitoring.py
+│   └── prediction.py
+│
+├── model/
+│   └── model_SQLalchemy.py
+│
+├── services/
+│   ├── analysis_services/
+│   │   ├── evidently_service.py
+│   │   └── monitoring_evaluation_service.py
+│   │
+│   ├── loader_services/
+│   │   ├── data_loading_service.py
+│   │   └── model_loading_service.py
+│   │
+│   ├── features_builder_service.py
+│   ├── history_service.py
+│   ├── logging_service.py
+│   ├── monitoring_service.py
+│   ├── prediction_logging_service.py
+│   └── prediction_service.py
+│
+└── main.py
+├── artifacts/
+├── data/
+├── tests/
+├── Dockerfile
+├── docker-compose.yml
+├── pyproject.toml
+├── .env.example
+└── README.md</code></pre>
 
 <pre><code>project/
 │
@@ -459,14 +507,7 @@ Centralise les alertes générées par les règles de drift, de performance ou d
 │   ├── enrich_features_table.py
 │   └── verify_model_features.py
 │
-├── artifacts/
-├── data/
-├── tests/
-├── Dockerfile
-├── docker-compose.yml
-├── pyproject.toml
-├── .env.example
-└── README.md</code></pre>
+
 
 <p>
 Le pipeline de création des tables et de préparation des données est porté par plusieurs scripts spécialisés, ce qui rend l’ensemble plus lisible et plus maintenable. 

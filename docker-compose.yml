@@ -34,6 +34,15 @@ services:
       MODEL_VERSION: v1
       SIMULATION_SOURCE_CSV: /app/data/application_test.csv
       DATA_PATH: /app/data
+      MONITORING_DIR: /app/artifacts/monitoring
+      PYTHONPATH: /app
+    command:
+      [
+        "uv", "run", "uvicorn",
+        "app.main:app",
+        "--host", "0.0.0.0",
+        "--port", "8000"
+      ]
     ports:
       - "8000:8000"
     volumes:
@@ -55,9 +64,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/credit_api
       API_URL: http://api:8000
-      FEATURES_TABLE: features_client_test_enriched
       DEFAULT_LIMIT: 200
       DATA_PATH: /app/data
+      PYTHONPATH: /app
     command:
       [
         "uv", "run", "streamlit", "run",
@@ -70,6 +79,8 @@ services:
     volumes:
       - ./dashboard:/app/dashboard
       - ./artifacts:/app/artifacts
+      - ./app:/app/app
+      - ./data:/app/data
 
 volumes:
   postgres_data:

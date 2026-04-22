@@ -510,12 +510,7 @@ def get_prediction_features_snapshot(
             },
         )
 
-        items = result.get("items", []) if isinstance(result, dict) else []
-
-        return PredictionFeaturesSnapshotResponse(
-            request_id=request_id,
-            features=items if isinstance(items, list) else [],
-)
+        return PredictionFeaturesSnapshotResponse.model_validate(result)
 
     except HTTPException:
         raise

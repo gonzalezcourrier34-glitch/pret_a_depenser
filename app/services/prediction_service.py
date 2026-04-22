@@ -3,7 +3,7 @@ Service de prédiction du modèle de scoring crédit.
 
 Ce module encapsule la logique métier liée à l'inférence du modèle.
 Il ne recharge pas le modèle à chaque appel : le modèle et le seuil
-de décision sont récupérés depuis `app.services.model_loading_service`,
+de décision sont récupérés depuis `app.services.loader_services.model_loading_service`,
 qui les charge une seule fois au démarrage de l'application.
 
 Fonctionnalités
@@ -14,19 +14,20 @@ Fonctionnalités
 - simulation batch à partir de données artificielles construites
   à partir du profil observé dans la source CSV configurée
 - journalisation des résultats en base PostgreSQL
+- enregistrement d'une vérité terrain liée à une prédiction
 - validation légère des entrées
 
 Architecture actuelle
 ---------------------
 - les données source proviennent du CSV configuré via APPLICATION_CSV
-- les features sont construites en mémoire via `feature_builder_service`
-- PostgreSQL sert uniquement au logging et au monitoring
+- les features sont construites en mémoire via `features_builder_service`
+- PostgreSQL sert uniquement au logging, à l'historique et au monitoring
 
 Notes
 -----
 - Le score retourné correspond à la probabilité de la classe positive.
 - La décision finale est calculée avec le seuil chargé depuis
-  `app.services.model_loading_service`.
+  `app.services.loader_services.model_loading_service`.
 - Les simulations "réelles" utilisent les clients présents dans
   la source applicative configurée.
 - Les commits et rollbacks sont gérés par l'appelant.
@@ -38,18 +39,20 @@ import logging
 import random
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Sequence
 
 import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.core.config import MODEL_NAME, MODEL_VERSION
-from app.services.data_loader_service import (
+from app.crud import prediction as prediction_crud
+from app.services.features_builder_service import build_features_from_loaded_data
+from app.services.loader_services.data_loading_service import (
     get_data_cache,
     get_features_for_client_from_cache,
 )
-from app.services.features_builder_service import build_features_from_loaded_data
-from app.services.model_loading_service import get_model, get_threshold
+from app.services.loader_services.model_loading_service import get_model, get_threshold
 from app.services.prediction_logging_service import PredictionLoggingService
 
 
@@ -72,6 +75,23 @@ RANDOM_PROFILE_SAMPLE_SIZE = 1000
 def _ensure_dataframe_from_dict(features: dict[str, Any]) -> pd.DataFrame:
     """
     Convertit un dictionnaire de features en DataFrame à une seule ligne.
+
+    Parameters
+    ----------
+    features : dict[str, Any]
+        Dictionnaire de features.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame pandas à une seule ligne.
+
+    Raises
+    ------
+    TypeError
+        Si `features` n'est pas un dictionnaire.
+    ValueError
+        Si `features` est vide.
     """
     if not isinstance(features, dict):
         raise TypeError("`features` doit être un dictionnaire Python.")
@@ -87,6 +107,23 @@ def _ensure_dataframe_from_dict(features: dict[str, Any]) -> pd.DataFrame:
 def _ensure_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Vérifie qu'un objet est bien un DataFrame pandas exploitable.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Objet à vérifier.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame validé.
+
+    Raises
+    ------
+    TypeError
+        Si l'objet n'est pas un DataFrame.
+    ValueError
+        Si le DataFrame est vide.
     """
     if not isinstance(df, pd.DataFrame):
         raise TypeError("L'entrée doit être un DataFrame pandas.")
@@ -102,6 +139,16 @@ def _ensure_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def _ensure_batch_size(size: int) -> None:
     """
     Vérifie qu'un batch respecte la limite maximale autorisée.
+
+    Parameters
+    ----------
+    size : int
+        Taille du batch.
+
+    Raises
+    ------
+    ValueError
+        Si la taille est invalide.
     """
     if size <= 0:
         raise ValueError("Le batch est vide.")
@@ -117,6 +164,20 @@ def _ensure_non_string_sequence(values: Sequence[Any], name: str) -> None:
     """
     Vérifie qu'une entrée est bien une séquence non vide
     et qu'il ne s'agit pas d'une chaîne de caractères.
+
+    Parameters
+    ----------
+    values : Sequence[Any]
+        Séquence à valider.
+    name : str
+        Nom logique de la variable.
+
+    Raises
+    ------
+    TypeError
+        Si l'entrée n'est pas une séquence acceptable.
+    ValueError
+        Si la séquence est vide.
     """
     if isinstance(values, (str, bytes)):
         raise TypeError(
@@ -133,6 +194,16 @@ def _ensure_non_string_sequence(values: Sequence[Any], name: str) -> None:
 def _clean_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
     """
     Remplace les NaN pandas par None dans un dictionnaire de features.
+
+    Parameters
+    ----------
+    features : dict[str, Any]
+        Dictionnaire source.
+
+    Returns
+    -------
+    dict[str, Any]
+        Dictionnaire nettoyé.
     """
     clean_features: dict[str, Any] = {}
 
@@ -145,6 +216,44 @@ def _clean_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
     return clean_features
 
 
+def _validate_ground_truth_inputs(
+    *,
+    request_id: str | None,
+    client_id: int | None,
+    true_label: int,
+    observed_at: datetime,
+) -> None:
+    """
+    Valide les paramètres métier d'un ground truth.
+
+    Parameters
+    ----------
+    request_id : str | None
+        Identifiant de requête éventuel.
+    client_id : int | None
+        Identifiant client éventuel.
+    true_label : int
+        Label réel observé.
+    observed_at : datetime
+        Date d'observation du label.
+
+    Raises
+    ------
+    ValueError
+        Si les données sont invalides.
+    """
+    if request_id is None and client_id is None:
+        raise ValueError(
+            "Au moins un identifiant doit être fourni : `request_id` ou `client_id`."
+        )
+
+    if true_label not in {0, 1}:
+        raise ValueError("`true_label` doit valoir 0 ou 1.")
+
+    if not isinstance(observed_at, datetime):
+        raise ValueError("`observed_at` doit être un datetime valide.")
+
+
 # =============================================================================
 # Helpers modèle
 # =============================================================================
@@ -152,6 +261,23 @@ def _clean_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
 def _predict_scores(df: pd.DataFrame) -> pd.Series:
     """
     Calcule les scores de probabilité de la classe positive.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Features prêtes pour le modèle.
+
+    Returns
+    -------
+    pd.Series
+        Série des probabilités de la classe positive.
+
+    Raises
+    ------
+    AttributeError
+        Si le modèle ne possède pas `predict_proba`.
+    ValueError
+        Si la sortie de `predict_proba` est invalide.
     """
     model = get_model()
 
@@ -198,6 +324,16 @@ def _predict_scores(df: pd.DataFrame) -> pd.Series:
 def _predict_raw(features: dict[str, Any]) -> tuple[int, float, float]:
     """
     Réalise la prédiction brute sans journalisation.
+
+    Parameters
+    ----------
+    features : dict[str, Any]
+        Dictionnaire de features prêtes pour le modèle.
+
+    Returns
+    -------
+    tuple[int, float, float]
+        Tuple `(prediction, score, threshold_used)`.
     """
     threshold = float(get_threshold())
     df = _ensure_dataframe_from_dict(features)
@@ -228,6 +364,18 @@ def _predict_raw(features: dict[str, Any]) -> tuple[int, float, float]:
 def _extract_application_df() -> pd.DataFrame:
     """
     Extrait le DataFrame applicatif brut depuis le cache.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame source applicatif.
+
+    Raises
+    ------
+    TypeError
+        Si le cache n'a pas le bon format.
+    ValueError
+        Si aucune source exploitable n'est trouvée.
     """
     cache = get_data_cache()
 
@@ -262,6 +410,18 @@ def extract_existing_client_ids(
 ) -> list[int]:
     """
     Extrait la liste des identifiants clients existants depuis un DataFrame.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame source.
+    client_id_column : str, optional
+        Nom de la colonne d'identifiants clients.
+
+    Returns
+    -------
+    list[int]
+        Liste des identifiants clients exploitables.
     """
     df = _ensure_dataframe(df)
 
@@ -305,6 +465,22 @@ def get_random_existing_client_ids(
 ) -> list[int]:
     """
     Sélectionne aléatoirement des identifiants clients existants.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Source des clients.
+    limit : int, optional
+        Nombre de clients à sélectionner.
+    client_id_column : str, optional
+        Colonne d'identifiant client.
+    random_seed : int | None, optional
+        Graine aléatoire.
+
+    Returns
+    -------
+    list[int]
+        Liste des identifiants tirés au hasard.
     """
     _ensure_batch_size(limit)
 
@@ -341,6 +517,11 @@ def get_random_existing_client_ids(
 def _load_client_source_dataframe() -> pd.DataFrame:
     """
     Charge la source client utilisée pour sélectionner des SK_ID_CURR réels.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame minimal contenant la colonne client.
     """
     app_df = _extract_application_df()
 
@@ -355,6 +536,16 @@ def _load_client_source_dataframe() -> pd.DataFrame:
 def _generate_random_value_from_series(series: pd.Series) -> Any:
     """
     Génère une valeur aléatoire à partir du profil observé d'une colonne.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Série source.
+
+    Returns
+    -------
+    Any
+        Valeur artificielle plausible.
     """
     clean = series.dropna()
 
@@ -403,6 +594,16 @@ def _build_random_feature_rows_from_application(
     """
     Construit des lignes artificielles aléatoires à partir du profil
     observé dans la source applicative CSV.
+
+    Parameters
+    ----------
+    limit : int
+        Nombre de lignes à générer.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Lignes artificielles générées.
     """
     app_df = _extract_application_df()
     app_df = _ensure_dataframe(app_df)
@@ -446,6 +647,16 @@ def _build_random_feature_rows_from_application(
 def _sanitize_feature_row(row: dict[str, Any]) -> tuple[int | None, dict[str, Any]]:
     """
     Sépare l'identifiant client éventuel des features modèle.
+
+    Parameters
+    ----------
+    row : dict[str, Any]
+        Ligne source.
+
+    Returns
+    -------
+    tuple[int | None, dict[str, Any]]
+        Tuple `(client_id, features)`.
     """
     row_copy = dict(row)
     client_id = row_copy.pop(CLIENT_ID_COLUMN, None)
@@ -464,6 +675,18 @@ def _sanitize_feature_row(row: dict[str, Any]) -> tuple[int | None, dict[str, An
 def _get_single_row_feature_dict(df: pd.DataFrame, *, context: str) -> dict[str, Any]:
     """
     Convertit un DataFrame à une seule ligne en dictionnaire de features propre.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame source.
+    context : str
+        Texte de contexte pour le message d'erreur.
+
+    Returns
+    -------
+    dict[str, Any]
+        Dictionnaire de features.
     """
     df = _ensure_dataframe(df)
 
@@ -480,6 +703,16 @@ def _get_features_for_client(client_id: int) -> dict[str, Any]:
     """
     Retourne les features prêtes pour le modèle pour un client donné
     à partir du cache applicatif.
+
+    Parameters
+    ----------
+    client_id : int
+        Identifiant client.
+
+    Returns
+    -------
+    dict[str, Any]
+        Features modèle.
     """
     client_df = get_features_for_client_from_cache(
         int(client_id),
@@ -523,6 +756,27 @@ def _log_success_prediction(
 ) -> None:
     """
     Journalise une prédiction réussie.
+
+    Parameters
+    ----------
+    prediction_logger : PredictionLoggingService
+        Service de logging applicatif.
+    request_id : str
+        Identifiant de requête.
+    client_id : int | None
+        Identifiant client éventuel.
+    features : dict[str, Any]
+        Features utilisées.
+    prediction : int
+        Classe prédite.
+    score : float
+        Score de probabilité.
+    threshold_used : float
+        Seuil appliqué.
+    latency_ms : float | None
+        Latence d'inférence.
+    source_table : str
+        Source logique.
     """
     features_df = pd.DataFrame([features])
 
@@ -564,6 +818,23 @@ def _log_error_prediction(
 ) -> None:
     """
     Journalise une erreur de prédiction.
+
+    Parameters
+    ----------
+    prediction_logger : PredictionLoggingService
+        Service de logging applicatif.
+    request_id : str
+        Identifiant de requête.
+    client_id : int | None
+        Identifiant client éventuel.
+    input_data : dict[str, Any]
+        Données d'entrée.
+    error_message : str
+        Message d'erreur.
+    latency_ms : float | None
+        Latence mesurée.
+    status_code : int, optional
+        Code de statut logique.
     """
     prediction_logger.log_prediction_error(
         request_id=request_id,
@@ -641,12 +912,24 @@ def make_prediction(
     Réalise une prédiction unitaire.
 
     Deux modes :
-    - sans `db` : retourne (prediction, score, threshold_used)
+    - sans `db` : retourne `(prediction, score, threshold_used)`
     - avec `db` : journalise et retourne un dictionnaire complet
 
-    Notes
-    -----
-    Les commits et rollbacks sont gérés par l'appelant.
+    Parameters
+    ----------
+    features : dict[str, Any]
+        Features prêtes pour le modèle.
+    client_id : int | None, optional
+        Identifiant client éventuel.
+    db : Session | None, optional
+        Session SQLAlchemy éventuelle.
+    source_table : str, optional
+        Source logique de la prédiction.
+
+    Returns
+    -------
+    dict[str, Any] | tuple[int, float, float]
+        Résultat de la prédiction.
     """
     clean_features = _clean_feature_dict(features)
 
@@ -780,9 +1063,19 @@ def make_prediction_from_client_id(
     Réalise une prédiction unitaire à partir d'un identifiant client
     présent dans le cache de features prêtes.
 
-    Deux modes :
-    - sans `db` : retourne (prediction, score, threshold_used)
-    - avec `db` : journalise et retourne un dictionnaire complet
+    Parameters
+    ----------
+    client_id : int
+        Identifiant du client à scorer.
+    db : Session | None, optional
+        Session SQLAlchemy éventuelle.
+    source_table : str, optional
+        Source logique.
+
+    Returns
+    -------
+    dict[str, Any] | tuple[int, float, float]
+        Résultat de la prédiction.
     """
     logger.info(
         "Prediction from client_id requested in prediction service",
@@ -809,6 +1102,16 @@ def make_prediction_from_client_id(
 def make_prediction_from_dataframe(df: pd.DataFrame) -> tuple[int, float, float]:
     """
     Réalise une prédiction unitaire à partir d'un DataFrame contenant une seule ligne.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame à une seule ligne.
+
+    Returns
+    -------
+    tuple[int, float, float]
+        Tuple `(prediction, score, threshold_used)`.
     """
     df = _ensure_dataframe(df)
 
@@ -849,6 +1152,16 @@ def make_prediction_from_dataframe(df: pd.DataFrame) -> tuple[int, float, float]
 def predict_one_row(df: pd.DataFrame) -> dict[str, Any]:
     """
     Retourne le résultat d'une prédiction unitaire sous forme de dictionnaire.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame à une ligne.
+
+    Returns
+    -------
+    dict[str, Any]
+        Dictionnaire de sortie.
     """
     prediction, score, threshold = make_prediction_from_dataframe(df)
 
@@ -866,6 +1179,16 @@ def predict_one_row(df: pd.DataFrame) -> dict[str, Any]:
 def make_batch_prediction(df: pd.DataFrame) -> pd.DataFrame:
     """
     Réalise des prédictions sur un lot de données sans logging.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame d'entrée.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame enrichi des scores et décisions.
     """
     df = _ensure_dataframe(df)
     _ensure_batch_size(len(df))
@@ -923,9 +1246,19 @@ def run_batch_prediction(
     - client_id
     - features
 
-    Notes
-    -----
-    Les commits et rollbacks sont gérés par l'appelant.
+    Parameters
+    ----------
+    payloads : Sequence[dict[str, Any]]
+        Payloads normalisés.
+    db : Session
+        Session SQLAlchemy active.
+    source_table : str
+        Source logique.
+
+    Returns
+    -------
+    dict[str, Any]
+        Résultat batch consolidé.
     """
     _ensure_non_string_sequence(payloads, "payloads")
     _ensure_batch_size(len(payloads))
@@ -1079,12 +1412,21 @@ def predict_batch_from_client_ids(
     source_table: str,
 ) -> dict[str, Any]:
     """
-    Réalise un batch de prédictions à partir d'une liste de clés clients,
-    avec récupération des features, prédiction et logging.
+    Réalise un batch de prédictions à partir d'une liste de clés clients.
 
-    Notes
-    -----
-    Les commits et rollbacks sont gérés par l'appelant.
+    Parameters
+    ----------
+    client_ids : Sequence[int]
+        Liste des identifiants clients.
+    db : Session
+        Session SQLAlchemy active.
+    source_table : str
+        Source logique.
+
+    Returns
+    -------
+    dict[str, Any]
+        Résultat batch consolidé.
     """
     _ensure_non_string_sequence(client_ids, "client_ids")
     _ensure_batch_size(len(client_ids))
@@ -1241,6 +1583,22 @@ def run_real_client_simulation(
     """
     Sélectionne des clients réels aléatoires, récupère leurs features,
     lance les prédictions puis journalise les résultats.
+
+    Parameters
+    ----------
+    limit : int
+        Nombre de clients à simuler.
+    random_seed : int | None
+        Graine aléatoire éventuelle.
+    db : Session
+        Session SQLAlchemy active.
+    source_table : str
+        Source logique.
+
+    Returns
+    -------
+    dict[str, Any]
+        Résultat batch de simulation.
     """
     _ensure_batch_size(limit)
 
@@ -1302,9 +1660,19 @@ def run_random_feature_simulation(
     Génère des données artificielles aléatoires à partir du profil
     observé dans la source applicative CSV, puis exécute les prédictions.
 
-    Notes
-    -----
-    Les commits et rollbacks sont gérés par l'appelant.
+    Parameters
+    ----------
+    limit : int
+        Nombre de lignes à générer.
+    db : Session
+        Session SQLAlchemy active.
+    source_table : str
+        Source logique.
+
+    Returns
+    -------
+    dict[str, Any]
+        Résultat batch de simulation.
     """
     _ensure_batch_size(limit)
 
@@ -1456,12 +1824,126 @@ def run_random_feature_simulation(
 
 
 # =============================================================================
+# API publique - ground truth
+# =============================================================================
+
+def create_ground_truth_label(
+    *,
+    db: Session,
+    request_id: str | None,
+    client_id: int | None,
+    true_label: int,
+    label_source: str | None,
+    observed_at: datetime,
+    notes: str | None,
+) -> dict[str, Any]:
+    """
+    Enregistre une vérité terrain dans `ground_truth_labels`.
+
+    Cette fonction porte la logique métier minimale :
+    validation d'entrée, appel CRUD et normalisation du payload de réponse.
+
+    Parameters
+    ----------
+    db : Session
+        Session SQLAlchemy active.
+    request_id : str | None
+        Identifiant de requête éventuel.
+    client_id : int | None
+        Identifiant client éventuel.
+    true_label : int
+        Label réel observé.
+    label_source : str | None
+        Source métier du label.
+    observed_at : datetime
+        Date d'observation.
+    notes : str | None
+        Notes complémentaires éventuelles.
+
+    Returns
+    -------
+    dict[str, Any]
+        Payload normalisé de réponse.
+
+    Raises
+    ------
+    ValueError
+        Si les entrées sont invalides.
+    """
+    logger.info(
+        "Ground truth creation requested in prediction service",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_ground_truth_create_start",
+                "request_id": request_id,
+                "client_id": client_id,
+                "true_label": true_label,
+                "label_source": label_source,
+            }
+        },
+    )
+
+    _validate_ground_truth_inputs(
+        request_id=request_id,
+        client_id=client_id,
+        true_label=true_label,
+        observed_at=observed_at,
+    )
+
+    entity = prediction_crud.create_ground_truth_label(
+        db,
+        request_id=request_id,
+        client_id=client_id,
+        true_label=int(true_label),
+        label_source=label_source,
+        observed_at=observed_at,
+        notes=notes,
+    )
+
+    payload = {
+        "id": entity.id,
+        "request_id": entity.request_id,
+        "client_id": entity.client_id,
+        "true_label": entity.true_label,
+        "label_source": entity.label_source,
+        "observed_at": entity.observed_at,
+        "notes": entity.notes,
+        "message": "Ground truth enregistré avec succès.",
+    }
+
+    logger.info(
+        "Ground truth created successfully in prediction service",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_ground_truth_create_success",
+                "id": entity.id,
+                "request_id": entity.request_id,
+                "client_id": entity.client_id,
+                "true_label": entity.true_label,
+            }
+        },
+    )
+
+    return payload
+
+
+# =============================================================================
 # Helpers de résumé
 # =============================================================================
 
 def summarize_batch_results(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """
     Résume les résultats d'un batch de prédictions.
+
+    Parameters
+    ----------
+    results : Sequence[dict[str, Any]]
+        Résultats unitaires.
+
+    Returns
+    -------
+    dict[str, Any]
+        Synthèse batch.
     """
     total = len(results)
     success_count = sum(1 for item in results if item.get("status") == "success")

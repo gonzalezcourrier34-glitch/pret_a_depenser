@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from app.model.model_SQLalchemy import (
     PredictionFeatureSnapshot,
     PredictionLog,
+    GroundTruthLabel
 )
 
 
@@ -473,3 +474,66 @@ def list_feature_snapshots_by_request_id(
     )
 
     return rows
+
+def create_ground_truth_label(
+    db: Session,
+    *,
+    request_id: str | None,
+    client_id: int | None,
+    true_label: int,
+    label_source: str | None,
+    observed_at: datetime,
+    notes: str | None,
+) -> GroundTruthLabel:
+    """
+    Crée une vérité terrain dans `ground_truth_labels`.
+
+    Parameters
+    ----------
+    db : Session
+        Session SQLAlchemy active.
+    request_id : str | None
+        Identifiant de requête éventuel.
+    client_id : int | None
+        Identifiant client éventuel.
+    true_label : int
+        Label réel observé.
+    label_source : str | None
+        Source métier du label.
+    observed_at : datetime
+        Date d'observation.
+    notes : str | None
+        Notes complémentaires.
+
+    Returns
+    -------
+    GroundTruthLabel
+        Entité SQLAlchemy ajoutée à la session.
+    """
+    entity = GroundTruthLabel(
+        request_id=request_id,
+        client_id=client_id,
+        true_label=true_label,
+        label_source=label_source,
+        observed_at=observed_at,
+        notes=notes,
+    )
+    db.add(entity)
+    db.flush()
+    db.refresh(entity)
+
+    logger.debug(
+        "CRUD prediction create_ground_truth_label done",
+        extra={
+            "extra_data": {
+                "event": "crud_prediction_create_ground_truth_success",
+                "id": entity.id,
+                "request_id": entity.request_id,
+                "client_id": entity.client_id,
+                "true_label": entity.true_label,
+                "label_source": entity.label_source,
+            }
+        },
+    )
+
+    return entity

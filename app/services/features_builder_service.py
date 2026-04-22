@@ -682,7 +682,7 @@ def build_model_ready_features(
     L'import du cache loader est volontairement local pour éviter
     les imports circulaires au chargement des modules.
     """
-    from app.services.data_loader_service import get_raw_data_cache
+    from app.services.loader_services.data_loading_service import get_raw_data_cache
 
     normalized_client_ids = _normalize_client_ids(client_ids)
 

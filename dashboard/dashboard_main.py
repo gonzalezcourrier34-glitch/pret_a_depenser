@@ -15,9 +15,13 @@ Toutes les données sont récupérées via l'API FastAPI.
 Architecture actuelle
 ---------------------
 - les prédictions utilisent des données issues exclusivement de
-  `application_test.csv` côté API
-- le dashboard ne lit plus de table SQL de features
-- PostgreSQL sert uniquement à l'historique, au logging et au monitoring
+  `application_test.csv` ou du cache CSV côté API
+- le dashboard ne lit plus de table SQL de features métier
+- PostgreSQL sert uniquement à l'historique, au logging
+  et au monitoring
+- les analyses avancées sont déclenchées via l'API :
+    - analyse Evidently
+    - évaluation monitoring
 """
 
 from __future__ import annotations
@@ -60,8 +64,10 @@ from dashboard_request import (
     get_prediction_history,
     metric_safe_number,
     run_evidently_analysis,
+    run_monitoring_evaluation_analysis,
 )
 from dashboard_systeme import render_systeme_page
+
 
 # =============================================================================
 # Configuration Streamlit
@@ -124,7 +130,7 @@ def safe_dict(value: Any) -> dict[str, Any]:
 
 def call_predict_client_api_wrapper(client_id: int) -> tuple[bool, Any]:
     """
-    Wrapper local pour appeler /predict/{client_id}
+    Wrapper local pour appeler `/predict/{client_id}`
     avec la configuration du dashboard.
     """
     return call_predict_client_api(
@@ -136,7 +142,8 @@ def call_predict_client_api_wrapper(client_id: int) -> tuple[bool, Any]:
 
 def call_predict_api_wrapper(payload: dict[str, Any]) -> tuple[bool, Any]:
     """
-    Wrapper local pour appeler /predict avec la configuration du dashboard.
+    Wrapper local pour appeler `/predict`
+    avec la configuration du dashboard.
     """
     return call_predict_api(
         payload,
@@ -147,7 +154,8 @@ def call_predict_api_wrapper(payload: dict[str, Any]) -> tuple[bool, Any]:
 
 def call_predict_batch_api_wrapper(payloads: list[dict[str, Any]]) -> tuple[bool, Any]:
     """
-    Wrapper local pour appeler /predict/batch avec la configuration du dashboard.
+    Wrapper local pour appeler `/predict/batch`
+    avec la configuration du dashboard.
     """
     return call_predict_batch_api(
         payloads,
@@ -161,7 +169,8 @@ def call_predict_real_random_batch_api_wrapper(
     random_seed: int | None = None,
 ) -> tuple[bool, Any]:
     """
-    Wrapper local pour appeler la route de simulation basée sur des données réelles.
+    Wrapper local pour appeler la route de simulation
+    basée sur des données réelles.
     """
     return call_predict_real_random_batch_api(
         batch_size=batch_size,
@@ -173,7 +182,8 @@ def call_predict_real_random_batch_api_wrapper(
 
 def call_predict_fully_random_batch_api_wrapper(batch_size: int) -> tuple[bool, Any]:
     """
-    Wrapper local pour appeler la route de simulation basée sur des données aléatoires.
+    Wrapper local pour appeler la route de simulation
+    basée sur des données aléatoires.
     """
     return call_predict_fully_random_batch_api(
         batch_size=batch_size,
@@ -243,6 +253,35 @@ def run_evidently_analysis_wrapper(
     )
 
 
+def run_monitoring_evaluation_analysis_wrapper(
+    *,
+    model_name: str,
+    model_version: str | None = None,
+    dataset_name: str = "scoring_prod",
+    window_start: str | None = None,
+    window_end: str | None = None,
+    beta: float = 2.0,
+    cost_fn: float = 10.0,
+    cost_fp: float = 1.0,
+) -> tuple[bool, Any]:
+    """
+    Wrapper local pour lancer une évaluation monitoring
+    avec la configuration du dashboard.
+    """
+    return run_monitoring_evaluation_analysis(
+        base_url=API_URL,
+        api_key=API_KEY,
+        model_name=model_name,
+        model_version=model_version,
+        dataset_name=dataset_name,
+        window_start=window_start,
+        window_end=window_end,
+        beta=beta,
+        cost_fn=cost_fn,
+        cost_fp=cost_fp,
+    )
+
+
 # =============================================================================
 # Chargements communs via l'API
 # =============================================================================
@@ -260,7 +299,7 @@ def load_shared_data(limit: int) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        Données mutualisées pour toutes les pages du dashboard.
+        Dictionnaire des données mutualisées pour toutes les pages.
     """
     health_data = safe_dict(get_health(base_url=API_URL))
 
@@ -506,4 +545,5 @@ elif page == "Monitoring":
         feature_store_monitoring_df=feature_store_monitoring_df,
         metric_safe_number=metric_safe_number,
         run_evidently_analysis=run_evidently_analysis_wrapper,
+        run_monitoring_evaluation_analysis=run_monitoring_evaluation_analysis_wrapper,
     )

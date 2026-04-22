@@ -10,6 +10,7 @@ Il gère :
 - l'appel aux services métier de prédiction
 - la journalisation indirecte via les services
 - la simulation de prédictions unitaires ou massives pour les tests
+- l'enregistrement d'une vérité terrain liée à une prédiction
 
 Principe d'architecture
 -----------------------
@@ -20,6 +21,13 @@ Les routes FastAPI doivent rester fines :
 - elles retournent la réponse HTTP
 
 La logique métier ne doit pas être implémentée directement ici.
+
+Notes
+-----
+- Les routes de lecture d'historique restent dans `route_history.py`.
+- La route d'écriture du ground truth est placée ici car elle appartient
+  au cycle métier d'une prédiction en production :
+  prédire -> journaliser -> recevoir le vrai label -> réévaluer.
 """
 
 from __future__ import annotations
@@ -33,14 +41,17 @@ from sqlalchemy.orm import Session
 from app.core.config import SIMULATION_DEFAULT_ITEMS, SIMULATION_MAX_ITEMS
 from app.core.db import get_db
 from app.core.schemas import (
+    GroundTruthCreateRequest,
+    GroundTruthCreateResponse,
     HealthResponse,
     PredictBatchResponse,
     PredictRequest,
     PredictResponse,
 )
 from app.core.security import verify_api_key
-from app.services.model_loading_service import get_model, get_threshold
+from app.services.loader_services.model_loading_service import get_model, get_threshold
 from app.services.prediction_service import (
+    create_ground_truth_label,
     make_prediction,
     make_prediction_from_client_id,
     run_batch_prediction,
@@ -76,6 +87,21 @@ def health(
 ) -> HealthResponse:
     """
     Vérifie que l'API, PostgreSQL, le modèle et le seuil sont accessibles.
+
+    Parameters
+    ----------
+    db : Session
+        Session SQLAlchemy injectée par FastAPI.
+
+    Returns
+    -------
+    HealthResponse
+        Réponse simple indiquant que le service est opérationnel.
+
+    Raises
+    ------
+    HTTPException
+        Retourne une erreur 503 si un composant critique n'est pas disponible.
     """
     logger.info(
         "Healthcheck requested",
@@ -136,6 +162,27 @@ def predict(
 ) -> PredictResponse:
     """
     Réalise une prédiction unitaire à partir des données d'entrée.
+
+    Parameters
+    ----------
+    payload : PredictRequest
+        Payload HTTP validé contenant l'identifiant client éventuel
+        et les features prêtes pour le modèle.
+    db : Session
+        Session SQLAlchemy active.
+    _ : None
+        Dépendance de sécurité utilisée pour vérifier la clé API.
+
+    Returns
+    -------
+    PredictResponse
+        Résultat normalisé de la prédiction.
+
+    Raises
+    ------
+    HTTPException
+        - 400 si la requête est invalide
+        - 500 si une erreur inattendue survient
     """
     logger.info(
         "Single prediction requested",
@@ -255,6 +302,26 @@ def predict_batch(
 ) -> PredictBatchResponse:
     """
     Réalise un batch de prédictions à partir d'une liste d'entrées.
+
+    Parameters
+    ----------
+    payloads : list[PredictRequest]
+        Liste des objets de prédiction unitaire à traiter.
+    db : Session
+        Session SQLAlchemy active.
+    _ : None
+        Dépendance de sécurité utilisée pour vérifier la clé API.
+
+    Returns
+    -------
+    PredictBatchResponse
+        Réponse batch contenant les résultats consolidés.
+
+    Raises
+    ------
+    HTTPException
+        - 400 si les données sont invalides
+        - 500 si une erreur inattendue survient
     """
     logger.info(
         "Batch prediction requested",
@@ -360,6 +427,26 @@ def predict_from_client_id(
     """
     Réalise une prédiction unitaire à partir d'un identifiant client
     existant dans le cache de features prêtes.
+
+    Parameters
+    ----------
+    client_id : int
+        Identifiant du client à scorer.
+    db : Session
+        Session SQLAlchemy active.
+    _ : None
+        Dépendance de sécurité utilisée pour vérifier la clé API.
+
+    Returns
+    -------
+    PredictResponse
+        Résultat normalisé de la prédiction.
+
+    Raises
+    ------
+    HTTPException
+        - 404 si le client est introuvable
+        - 500 si une erreur inattendue survient
     """
     logger.info(
         "Prediction from client_id requested",
@@ -452,6 +539,144 @@ def predict_from_client_id(
 
 
 # =============================================================================
+# Endpoint d'enregistrement d'une vérité terrain
+# =============================================================================
+
+@router.post(
+    "/ground-truth",
+    response_model=GroundTruthCreateResponse,
+    summary="Enregistrer une vérité terrain liée à une prédiction",
+)
+def create_prediction_ground_truth(
+    payload: GroundTruthCreateRequest,
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_api_key),
+) -> GroundTruthCreateResponse:
+    """
+    Enregistre une vérité terrain dans `ground_truth_labels`.
+
+    Cette route permet d'ajouter a posteriori le vrai résultat observé
+    pour une prédiction déjà effectuée. Elle appartient au cycle métier
+    de la prédiction en production.
+
+    Parameters
+    ----------
+    payload : GroundTruthCreateRequest
+        Données validées contenant :
+        - request_id éventuel
+        - client_id éventuel
+        - true_label
+        - label_source
+        - observed_at
+        - notes
+    db : Session
+        Session SQLAlchemy active.
+    _ : None
+        Dépendance de sécurité utilisée pour vérifier la clé API.
+
+    Returns
+    -------
+    GroundTruthCreateResponse
+        Réponse normalisée confirmant l'enregistrement.
+
+    Raises
+    ------
+    HTTPException
+        - 400 si les données sont invalides
+        - 500 si une erreur inattendue survient
+    """
+    logger.info(
+        "Ground truth creation requested",
+        extra={
+            "extra_data": {
+                "event": "predict_ground_truth_create_start",
+                "request_id": payload.request_id,
+                "client_id": payload.client_id,
+                "true_label": payload.true_label,
+                "label_source": payload.label_source,
+            }
+        },
+    )
+
+    try:
+        result = create_ground_truth_label(
+            db=db,
+            request_id=payload.request_id,
+            client_id=payload.client_id,
+            true_label=payload.true_label,
+            label_source=payload.label_source,
+            observed_at=payload.observed_at,
+            notes=payload.notes,
+        )
+
+        if not isinstance(result, dict):
+            raise TypeError(
+                "Le service d'enregistrement du ground truth devait retourner un dictionnaire."
+            )
+
+        db.commit()
+
+        logger.info(
+            "Ground truth created successfully",
+            extra={
+                "extra_data": {
+                    "event": "predict_ground_truth_create_success",
+                    "id": result.get("id"),
+                    "request_id": result.get("request_id"),
+                    "client_id": result.get("client_id"),
+                    "true_label": result.get("true_label"),
+                }
+            },
+        )
+
+        return GroundTruthCreateResponse.model_validate(result)
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except ValueError as exc:
+        db.rollback()
+
+        logger.warning(
+            "Ground truth creation rejected",
+            extra={
+                "extra_data": {
+                    "event": "predict_ground_truth_create_value_error",
+                    "request_id": payload.request_id,
+                    "client_id": payload.client_id,
+                    "error": str(exc),
+                }
+            },
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Création du ground truth impossible : {exc}",
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
+
+        logger.exception(
+            "Unexpected error during ground truth creation",
+            extra={
+                "extra_data": {
+                    "event": "predict_ground_truth_create_exception",
+                    "request_id": payload.request_id,
+                    "client_id": payload.client_id,
+                    "error": str(exc),
+                }
+            },
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur interne lors de la création du ground truth : {exc}",
+        ) from exc
+
+
+# =============================================================================
 # Endpoint simulation à partir de données réelles
 # =============================================================================
 
@@ -476,6 +701,28 @@ def simulate_real_sample_predictions(
 ) -> PredictBatchResponse:
     """
     Lance une simulation de prédictions à partir de clients réels.
+
+    Parameters
+    ----------
+    limit : int
+        Nombre de clients à tirer et à scorer.
+    random_seed : int | None
+        Graine optionnelle pour contrôler l'aléa.
+    db : Session
+        Session SQLAlchemy active.
+    _ : None
+        Dépendance de sécurité utilisée pour vérifier la clé API.
+
+    Returns
+    -------
+    PredictBatchResponse
+        Réponse batch consolidée.
+
+    Raises
+    ------
+    HTTPException
+        - 400 si la simulation est impossible
+        - 500 si une erreur inattendue survient
     """
     logger.info(
         "Real sample simulation requested",
@@ -582,6 +829,26 @@ def simulate_random_predictions(
 ) -> PredictBatchResponse:
     """
     Lance une simulation de prédictions à partir de données artificielles.
+
+    Parameters
+    ----------
+    limit : int
+        Nombre de lignes à simuler.
+    db : Session
+        Session SQLAlchemy active.
+    _ : None
+        Dépendance de sécurité utilisée pour vérifier la clé API.
+
+    Returns
+    -------
+    PredictBatchResponse
+        Réponse batch consolidée.
+
+    Raises
+    ------
+    HTTPException
+        - 400 si la simulation est impossible
+        - 500 si une erreur inattendue survient
     """
     logger.info(
         "Random simulation requested",

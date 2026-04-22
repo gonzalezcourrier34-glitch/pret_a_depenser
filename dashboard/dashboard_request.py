@@ -43,6 +43,10 @@ Monitoring
 - GET /monitoring/alerts
 - GET /monitoring/feature-store
 
+Analyse
+- POST /analyse/evidently/run
+- POST /analyse/evaluation/run
+
 Features
 - GET /features/client/{client_id}
   ou équivalent si cet endpoint existe côté API
@@ -63,7 +67,8 @@ import requests
 DEFAULT_TIMEOUT = 30
 DEFAULT_BATCH_TIMEOUT = 60
 DEFAULT_SIMULATION_TIMEOUT = 120
-DEFAULT_EVIDENTLY_TIMEOUT = 300
+DEFAULT_ANALYSIS_TIMEOUT = 300
+
 
 def build_headers(api_key: str | None = None) -> dict[str, str]:
     """
@@ -252,14 +257,16 @@ def _postprocess_prediction_logs(df: pd.DataFrame) -> pd.DataFrame:
     """
     Post-traitement standard des logs de prédiction.
     """
-    df = _coerce_datetime_columns(df, ["prediction_timestamp"])
+    df = _coerce_datetime_columns(df, ["prediction_timestamp", "created_at"])
     df = _coerce_numeric_columns(
         df,
-        ["client_id", "prediction", "score", "threshold", "latency_ms"],
+        ["client_id", "prediction", "score", "threshold", "threshold_used", "latency_ms"],
     )
 
     if "prediction_timestamp" in df.columns:
         df = df.sort_values("prediction_timestamp", ascending=False, na_position="last")
+    elif "created_at" in df.columns:
+        df = df.sort_values("created_at", ascending=False, na_position="last")
 
     return df
 
@@ -268,11 +275,15 @@ def _postprocess_ground_truth(df: pd.DataFrame) -> pd.DataFrame:
     """
     Post-traitement standard des vérités terrain.
     """
-    df = _coerce_datetime_columns(df, ["observed_at"])
-    df = _coerce_numeric_columns(df, ["client_id", "ground_truth"])
+    df = _coerce_datetime_columns(df, ["observed_at", "created_at", "gt_created_at"])
+    df = _coerce_numeric_columns(df, ["client_id", "ground_truth", "y_true"])
 
     if "observed_at" in df.columns:
         df = df.sort_values("observed_at", ascending=False, na_position="last")
+    elif "created_at" in df.columns:
+        df = df.sort_values("created_at", ascending=False, na_position="last")
+    elif "gt_created_at" in df.columns:
+        df = df.sort_values("gt_created_at", ascending=False, na_position="last")
 
     return df
 
@@ -404,6 +415,7 @@ def metric_safe_number(
 
     return default
 
+
 def normalize_prediction_result(payload: Any) -> dict[str, Any]:
     """
     Normalise un résultat de prédiction unitaire en dictionnaire.
@@ -411,6 +423,7 @@ def normalize_prediction_result(payload: Any) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     return {"result": payload}
+
 
 # =============================================================================
 # Endpoints santé / système
@@ -481,9 +494,6 @@ def load_client_features(
     return pd.DataFrame()
 
 
-# =============================================================================
-# Endpoints prédiction
-# =============================================================================
 # =============================================================================
 # Endpoints prédiction
 # =============================================================================
@@ -600,20 +610,12 @@ def prediction_result_to_dataframe(payload: Any) -> pd.DataFrame:
     return dict_payload_to_dataframe(payload)
 
 
-def normalize_prediction_result(payload: Any) -> dict[str, Any]:
-    """
-    Normalise un résultat de prédiction unitaire en dictionnaire.
-    """
-    if isinstance(payload, dict):
-        return payload
-    return {"result": payload}
-
-
 def simulation_result_to_dataframe(payload: Any) -> pd.DataFrame:
     """
     Convertit un résultat de simulation batch en DataFrame.
     """
     return items_payload_to_dataframe(payload)
+
 
 # =============================================================================
 # Endpoints historique
@@ -1218,8 +1220,9 @@ def build_preview_map(
         "alerts": alerts_df.head(max_rows),
     }
 
+
 # =============================================================================
-# Endpoints Evidently
+# Endpoints analyse
 # =============================================================================
 
 def run_evidently_analysis(
@@ -1232,7 +1235,7 @@ def run_evidently_analysis(
     current_kind: str = "transformed",
     monitoring_dir: str | None = None,
     save_html_path: str | None = "artifacts/evidently/report.html",
-    timeout: int = DEFAULT_EVIDENTLY_TIMEOUT,
+    timeout: int = DEFAULT_ANALYSIS_TIMEOUT,
 ) -> tuple[bool, Any]:
     """
     Lance une analyse Evidently via l'API FastAPI.
@@ -1240,7 +1243,7 @@ def run_evidently_analysis(
     Notes
     -----
     Cette fonction appelle la route :
-    - POST /evidently/run
+    - POST /analyse/evidently/run
 
     Les paramètres sont passés en query params pour rester cohérents
     avec la signature actuelle de la route FastAPI.
@@ -1261,7 +1264,59 @@ def run_evidently_analysis(
         params["save_html_path"] = save_html_path
 
     return call_api(
-        "/evidently/run",
+        "/analyse/evidently/run",
+        base_url=base_url,
+        api_key=api_key,
+        method="POST",
+        params=params,
+        timeout=timeout,
+    )
+
+
+def run_monitoring_evaluation_analysis(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    model_version: str | None = None,
+    dataset_name: str = "scoring_prod",
+    window_start: str | None = None,
+    window_end: str | None = None,
+    beta: float = 2.0,
+    cost_fn: float = 10.0,
+    cost_fp: float = 1.0,
+    timeout: int = DEFAULT_ANALYSIS_TIMEOUT,
+) -> tuple[bool, Any]:
+    """
+    Lance une analyse d'évaluation monitoring via l'API FastAPI.
+
+    Notes
+    -----
+    Cette fonction appelle la route :
+    - POST /analyse/evaluation/run
+
+    Les paramètres sont passés en query params pour rester cohérents
+    avec la signature actuelle de la route FastAPI.
+    """
+    params: dict[str, Any] = {
+        "model_name": model_name,
+        "dataset_name": dataset_name,
+        "beta": beta,
+        "cost_fn": cost_fn,
+        "cost_fp": cost_fp,
+    }
+
+    if model_version is not None:
+        params["model_version"] = model_version
+
+    if window_start is not None:
+        params["window_start"] = window_start
+
+    if window_end is not None:
+        params["window_end"] = window_end
+
+    return call_api(
+        "/analyse/evaluation/run",
         base_url=base_url,
         api_key=api_key,
         method="POST",

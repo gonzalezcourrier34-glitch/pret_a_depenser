@@ -117,6 +117,7 @@ REFERENCE_FEATURES_PATH = Path(
     )
 )
 
+MONITORING_DIR = Path(os.getenv("MONITORING_DIR","artifacts/monitoring"))
 CURRENT_WINDOW_DAYS = _get_int("CURRENT_WINDOW_DAYS", "7")
 ANALYSIS_START = os.getenv("ANALYSIS_START")
 ANALYSIS_END = os.getenv("ANALYSIS_END")

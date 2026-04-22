@@ -6,6 +6,7 @@ Cette page regroupe :
 - les métriques de performance du modèle
 - l'analyse de dérive des données
 - les alertes et le registre des modèles
+- le déclenchement manuel des analyses avancées
 
 Notes
 -----
@@ -28,7 +29,8 @@ Architecture
 - Cette page ne fait que :
     1. sécuriser les données reçues,
     2. calculer quelques KPI,
-    3. afficher les visualisations.
+    3. afficher les visualisations,
+    4. déclencher certaines analyses via l'API.
 """
 
 from __future__ import annotations
@@ -273,9 +275,37 @@ def render_monitoring_page(
     feature_store_monitoring_df: pd.DataFrame,
     metric_safe_number,
     run_evidently_analysis,
+    run_monitoring_evaluation_analysis,
 ) -> None:
     """
     Affiche la page de monitoring du modèle.
+
+    Parameters
+    ----------
+    monitoring_summary : dict
+        Résumé global de monitoring renvoyé par l'API.
+    monitoring_health : dict
+        État synthétique de santé du monitoring.
+    prediction_logs_df : pd.DataFrame
+        Historique des prédictions.
+    model_registry_df : pd.DataFrame
+        Registre des modèles.
+    active_model_df : pd.DataFrame
+        Modèle actuellement actif.
+    evaluation_metrics_df : pd.DataFrame
+        Historique des métriques d'évaluation.
+    drift_metrics_df : pd.DataFrame
+        Historique des métriques de drift.
+    alerts_df : pd.DataFrame
+        Historique des alertes.
+    feature_store_monitoring_df : pd.DataFrame
+        Feature store de monitoring.
+    metric_safe_number : callable
+        Helper partagé pour calculer des métriques numériques de façon sûre.
+    run_evidently_analysis : callable
+        Fonction déclenchant l'analyse Evidently via l'API.
+    run_monitoring_evaluation_analysis : callable
+        Fonction déclenchant l'évaluation monitoring via l'API.
     """
     summary = _safe_dict(monitoring_summary)
     health = _safe_dict(monitoring_health)
@@ -332,11 +362,11 @@ def render_monitoring_page(
 
     prediction_logs_df = _coerce_columns_to_datetime(
         prediction_logs_df,
-        ["prediction_timestamp"],
+        ["prediction_timestamp", "created_at"],
     )
     prediction_logs_df = _coerce_columns_to_numeric(
         prediction_logs_df,
-        ["score", "threshold", "latency_ms", "prediction"],
+        ["score", "threshold", "threshold_used", "latency_ms", "prediction"],
     )
 
     alerts_df = _coerce_columns_to_datetime(
@@ -359,9 +389,6 @@ def render_monitoring_page(
         ["snapshot_timestamp"],
     )
 
-    # -------------------------------------------------------------------------
-    # Calculs de synthèse
-    # -------------------------------------------------------------------------
     detected_count_df = 0
     if not drift_metrics_df.empty and "drift_detected" in drift_metrics_df.columns:
         detected_count_df = int(
@@ -414,17 +441,11 @@ def render_monitoring_page(
     has_drift_metrics = _safe_bool(health.get("has_drift_metrics"))
     has_latest_evaluation = _safe_bool(health.get("has_latest_evaluation"))
 
-    # -------------------------------------------------------------------------
-    # Header
-    # -------------------------------------------------------------------------
     st.markdown("## Monitoring MLOps")
     st.caption(
         "Centre de pilotage du modèle en production : performance, dérive, alertes, latence et cycle de vie des versions."
     )
 
-    # -------------------------------------------------------------------------
-    # Bandeau KPI principal
-    # -------------------------------------------------------------------------
     k1, k2, k3, k4, k5 = st.columns(5)
 
     with k1:
@@ -465,9 +486,6 @@ def render_monitoring_page(
 
     st.markdown("")
 
-    # -------------------------------------------------------------------------
-    # Bloc modèle actif + statut
-    # -------------------------------------------------------------------------
     left, right = st.columns([2, 1])
 
     with left:
@@ -573,9 +591,6 @@ def render_monitoring_page(
             unsafe_allow_html=True,
         )
 
-    # -------------------------------------------------------------------------
-    # Tabs
-    # -------------------------------------------------------------------------
     tabs = st.tabs(
         [
             "Vue d'ensemble",
@@ -585,9 +600,6 @@ def render_monitoring_page(
         ]
     )
 
-    # =====================================================================
-    # ONGLET 1 - VUE D'ENSEMBLE
-    # =====================================================================
     with tabs[0]:
         _render_section_title(
             "Vue d'ensemble",
@@ -643,9 +655,6 @@ def render_monitoring_page(
             else:
                 st.info("Aucune synthèse d'évaluation disponible.")
 
-    # =====================================================================
-    # ONGLET 2 - PERFORMANCE
-    # =====================================================================
     with tabs[1]:
         _render_section_title(
             "Performance du modèle",
@@ -732,24 +741,140 @@ def render_monitoring_page(
                 )
 
         st.markdown("")
+        st.markdown("#### Exécution évaluation monitoring")
+
+        default_model_name = "credit_scoring_model"
+        default_model_version = None
+
+        if latest_active_model_row is not None:
+            model_name_value = latest_active_model_row.get("model_name")
+            if model_name_value is not None and pd.notna(model_name_value):
+                default_model_name = str(model_name_value)
+
+            model_version_value = latest_active_model_row.get("model_version")
+            if model_version_value is not None and pd.notna(model_version_value):
+                default_model_version = str(model_version_value)
+
+        eval_col1, eval_col2, eval_col3, eval_col4 = st.columns([1, 1, 1, 1])
+
+        with eval_col1:
+            evaluation_dataset_name = st.text_input(
+                "Dataset name",
+                value="scoring_prod",
+                key="monitoring_eval_dataset_name",
+            )
+
+        with eval_col2:
+            evaluation_beta = st.number_input(
+                "Beta",
+                min_value=0.5,
+                max_value=10.0,
+                value=2.0,
+                step=0.5,
+                key="monitoring_eval_beta",
+            )
+
+        with eval_col3:
+            evaluation_cost_fn = st.number_input(
+                "Coût FN",
+                min_value=0.0,
+                value=10.0,
+                step=1.0,
+                key="monitoring_eval_cost_fn",
+            )
+
+        with eval_col4:
+            evaluation_cost_fp = st.number_input(
+                "Coût FP",
+                min_value=0.0,
+                value=1.0,
+                step=1.0,
+                key="monitoring_eval_cost_fp",
+            )
+
+        run_eval_clicked = st.button(
+            "Lancer l'évaluation monitoring",
+            type="primary",
+            use_container_width=True,
+            key="run_monitoring_evaluation_button",
+        )
+
+        if run_eval_clicked:
+            with st.spinner("Évaluation monitoring en cours..."):
+                ok, result = run_monitoring_evaluation_analysis(
+                    model_name=default_model_name,
+                    model_version=default_model_version,
+                    dataset_name=evaluation_dataset_name,
+                    beta=float(evaluation_beta),
+                    cost_fn=float(evaluation_cost_fn),
+                    cost_fp=float(evaluation_cost_fp),
+                )
+
+            if ok:
+                if isinstance(result, dict) and result.get("success", False):
+                    st.success(
+                        result.get(
+                            "message",
+                            "Évaluation monitoring exécutée avec succès.",
+                        )
+                    )
+
+                    sample_size = result.get("sample_size")
+                    matched_rows = result.get("matched_rows")
+                    threshold_used = result.get("threshold_used")
+
+                    info_parts = []
+                    if sample_size is not None:
+                        info_parts.append(f"sample_size={sample_size}")
+                    if matched_rows is not None:
+                        info_parts.append(f"matched_rows={matched_rows}")
+                    if threshold_used is not None:
+                        info_parts.append(f"threshold_used={threshold_used}")
+
+                    if info_parts:
+                        st.caption(" | ".join(info_parts))
+
+                    with st.expander("Voir le résultat de l'évaluation", expanded=False):
+                        st.json(result)
+
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    detail = (
+                        result.get("message")
+                        if isinstance(result, dict)
+                        else result
+                    )
+                    st.error(f"Évaluation monitoring non réussie : {detail}")
+            else:
+                detail = (
+                    result.get("detail")
+                    if isinstance(result, dict)
+                    else result
+                )
+                st.error(f"Erreur API évaluation monitoring : {detail}")
+
+        st.markdown("")
         st.markdown("#### Latence d'inférence")
 
         if prediction_logs_df.empty:
             st.info("Aucune donnée de prédiction disponible via `/history/predictions`.")
-        elif "prediction_timestamp" not in prediction_logs_df.columns:
-            st.info("La colonne `prediction_timestamp` est absente des données reçues.")
+        elif "prediction_timestamp" not in prediction_logs_df.columns and "created_at" not in prediction_logs_df.columns:
+            st.info("Aucune colonne temporelle exploitable n'est présente dans les logs de prédiction.")
         elif "latency_ms" not in prediction_logs_df.columns:
             st.info("La colonne `latency_ms` est absente des données reçues.")
         else:
+            latency_time_col = "prediction_timestamp" if "prediction_timestamp" in prediction_logs_df.columns else "created_at"
+
             latency_df = (
                 prediction_logs_df
-                .dropna(subset=["prediction_timestamp"])
-                .sort_values("prediction_timestamp")
+                .dropna(subset=[latency_time_col])
+                .sort_values(latency_time_col)
             )
 
             if not latency_df.empty:
                 st.line_chart(
-                    latency_df.set_index("prediction_timestamp")[["latency_ms"]]
+                    latency_df.set_index(latency_time_col)[["latency_ms"]]
                 )
 
                 l1, l2, l3 = st.columns(3)
@@ -770,7 +895,7 @@ def render_monitoring_page(
                 preferred_cols = _choose_existing_columns(
                     latency_df,
                     [
-                        "prediction_timestamp",
+                        latency_time_col,
                         "request_id",
                         "client_id",
                         "model_name",
@@ -778,6 +903,7 @@ def render_monitoring_page(
                         "score",
                         "prediction",
                         "threshold",
+                        "threshold_used",
                         "latency_ms",
                         "status",
                         "error_message",
@@ -788,9 +914,6 @@ def render_monitoring_page(
                     width="stretch",
                 )
 
-    # =====================================================================
-    # ONGLET 3 - DÉRIVE
-    # =====================================================================
     with tabs[2]:
         _render_section_title(
             "Dérive des données",
@@ -1065,9 +1188,6 @@ def render_monitoring_page(
                     width="stretch",
                 )
 
-    # =====================================================================
-    # ONGLET 4 - ALERTES ET MODÈLES
-    # =====================================================================
     with tabs[3]:
         _render_section_title(
             "Alertes et registre des modèles",

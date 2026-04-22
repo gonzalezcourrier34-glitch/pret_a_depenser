@@ -9,7 +9,7 @@ Architecture
 ------------
 - app.core.config : configuration
 - app.core.db : connexion base de données
-- app.api.routes : routes FastAPI
+- app.api : routes FastAPI
 - app.services : logique métier
 - app.crud : persistance PostgreSQL
 - app.model : modèles SQLAlchemy
@@ -19,6 +19,7 @@ Architecture actuelle
 - les données de prédiction proviennent exclusivement du `.csv`
 - le modèle et le seuil sont chargés au démarrage
 - PostgreSQL sert uniquement au logging et au monitoring
+- les analyses avancées passent par la route `/analyse`
 """
 
 from __future__ import annotations
@@ -27,27 +28,33 @@ import logging
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
+
+# =============================================================================
+# Chargement des variables d'environnement
+# =============================================================================
+
+# Important :
+# Le fichier .env doit être chargé avant les imports applicatifs susceptibles
+# de lire la configuration au moment de l'import.
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 
-from app.api.route_evidently import router as evidently_router
+from app.api.route_analyse import router as analyse_router
 from app.api.route_history import router as history_router
 from app.api.route_monitoring import router as monitoring_router
 from app.api.route_prediction import router as predict_router
 from app.core.config import DEBUG
 from app.core.db import SessionLocal
 from app.core.logging_config import setup_logging
+from app.services.loader_services.data_loading_service import init_full_data_cache
+from app.services.loader_services.model_loading_service import (
+    get_model,
+    get_threshold,
+)
 from app.services.logging_service import LoggingMiddleware
-from app.services.data_loader_service import init_full_data_cache
-from app.services.model_loading_service import get_model, get_threshold
-
-
-# =============================================================================
-# Chargement des variables d'environnement
-# =============================================================================
-
-load_dotenv()
 
 
 # =============================================================================
@@ -70,16 +77,23 @@ OPENAPI_TAGS = [
     {
         "name": "History",
         "description": (
-            "Consultation de l'historique des prédictions, labels et features."
+            "Consultation de l'historique des prédictions, des labels "
+            "et des snapshots de features."
         ),
     },
     {
         "name": "Monitoring",
-        "description": "Suivi du modèle, alertes, synthèses et état du monitoring.",
+        "description": (
+            "Suivi du modèle en production : synthèses, alertes, "
+            "métriques de dérive, métriques d'évaluation et feature store."
+        ),
     },
     {
-        "name": "Evidently",
-        "description": "Analyses de dérive de données via Evidently.",
+        "name": "Analyse",
+        "description": (
+            "Analyses avancées de monitoring : dérive de données via Evidently "
+            "et évaluation du modèle."
+        ),
     },
 ]
 
@@ -102,9 +116,21 @@ async def lifespan(app: FastAPI):
     Au démarrage, l'application vérifie :
     - l'accès au modèle de scoring
     - le chargement du seuil métier
-    - la disponibilité minimale de la base PostgreSQL
+    - la disponibilité minimale de PostgreSQL
     - le chargement en mémoire des données CSV métier
+
+    Parameters
+    ----------
+    app : FastAPI
+        Instance FastAPI en cours d'initialisation.
+
+    Yields
+    ------
+    None
+        Rend la main à FastAPI une fois l'initialisation terminée.
     """
+    _ = app
+
     logger.info(
         "Application startup initiated",
         extra={
@@ -214,7 +240,7 @@ app = FastAPI(
     title="API de scoring crédit",
     description=(
         "API de prédiction du risque de défaut avec journalisation "
-        "PostgreSQL et endpoints de monitoring."
+        "PostgreSQL, endpoints de monitoring et routes d'analyse."
     ),
     version="1.0.0",
     debug=DEBUG,
@@ -254,4 +280,4 @@ def root() -> RedirectResponse:
 app.include_router(predict_router)
 app.include_router(history_router)
 app.include_router(monitoring_router)
-app.include_router(evidently_router)
+app.include_router(analyse_router)
