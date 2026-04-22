@@ -83,8 +83,12 @@ TABLES_TO_TRUNCATE: Final[list[str]] = [
     "feature_store_monitoring",
     "drift_metrics",
     "evaluation_metrics",
-    "alerts"
+    "alerts",
 
+    # -------------------------------------------------------------------------
+    # Monitoring
+    # -------------------------------------------------------------------------
+    "model_registry"
 ]
 
 

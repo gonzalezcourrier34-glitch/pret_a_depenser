@@ -22,6 +22,7 @@ Endpoints
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -36,6 +37,9 @@ from app.core.schemas import (
 )
 from app.core.security import verify_api_key
 from app.services import history_service
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -133,6 +137,22 @@ def get_prediction_history(
     Le filtre `decision` est converti en valeur binaire de la colonne
     `prediction` selon la convention métier définie dans ce module.
     """
+    logger.info(
+        "Prediction history requested",
+        extra={
+            "extra_data": {
+                "event": "history_predictions_start",
+                "limit": limit,
+                "offset": offset,
+                "client_id": client_id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "only_errors": only_errors,
+                "decision": decision,
+            }
+        },
+    )
+
     try:
         prediction_value = resolve_decision_to_prediction_value(decision)
 
@@ -147,11 +167,51 @@ def get_prediction_history(
             prediction_value=prediction_value,
         )
 
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        total = payload.get("total", 0) if isinstance(payload, dict) else 0
+
+        logger.info(
+            "Prediction history returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "history_predictions_success",
+                    "limit": limit,
+                    "offset": offset,
+                    "client_id": client_id,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "only_errors": only_errors,
+                    "decision": decision,
+                    "prediction_value": prediction_value,
+                    "returned_items": len(items) if isinstance(items, list) else 0,
+                    "total": total,
+                }
+            },
+        )
+
         return PredictionHistoryResponse.model_validate(payload)
 
     except HTTPException:
         raise
+
     except ValueError as exc:
+        logger.warning(
+            "Prediction history request rejected",
+            extra={
+                "extra_data": {
+                    "event": "history_predictions_value_error",
+                    "limit": limit,
+                    "offset": offset,
+                    "client_id": client_id,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "only_errors": only_errors,
+                    "decision": decision,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
@@ -159,7 +219,25 @@ def get_prediction_history(
                 f"{exc}"
             ),
         ) from exc
+
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving prediction history",
+            extra={
+                "extra_data": {
+                    "event": "history_predictions_exception",
+                    "limit": limit,
+                    "offset": offset,
+                    "client_id": client_id,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "only_errors": only_errors,
+                    "decision": decision,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=(
@@ -182,6 +260,16 @@ def get_prediction_detail(
     """
     Retourne le détail d'une prédiction pour un request_id donné.
     """
+    logger.info(
+        "Prediction detail requested",
+        extra={
+            "extra_data": {
+                "event": "history_prediction_detail_start",
+                "request_id": request_id,
+            }
+        },
+    )
+
     try:
         result = history_service.get_prediction_detail(
             db,
@@ -189,21 +277,65 @@ def get_prediction_detail(
         )
 
         if result is None:
+            logger.warning(
+                "Prediction detail not found",
+                extra={
+                    "extra_data": {
+                        "event": "history_prediction_detail_not_found",
+                        "request_id": request_id,
+                    }
+                },
+            )
+
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Aucune prédiction trouvée pour request_id={request_id}",
             )
 
+        logger.info(
+            "Prediction detail returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "history_prediction_detail_success",
+                    "request_id": request_id,
+                }
+            },
+        )
+
         return PredictionDetailResponse.model_validate(result)
 
     except HTTPException:
         raise
+
     except ValueError as exc:
+        logger.warning(
+            "Prediction detail request rejected",
+            extra={
+                "extra_data": {
+                    "event": "history_prediction_detail_value_error",
+                    "request_id": request_id,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Erreur lors de la récupération du détail de prédiction : {exc}",
         ) from exc
+
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving prediction detail",
+            extra={
+                "extra_data": {
+                    "event": "history_prediction_detail_exception",
+                    "request_id": request_id,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération du détail de prédiction : {exc}",
@@ -230,6 +362,19 @@ def get_ground_truth_history(
     """
     Retourne l'historique des vérités terrain enregistrées.
     """
+    logger.info(
+        "Ground truth history requested",
+        extra={
+            "extra_data": {
+                "event": "history_ground_truth_start",
+                "limit": limit,
+                "offset": offset,
+                "client_id": client_id,
+                "request_id": request_id,
+            }
+        },
+    )
+
     try:
         payload = history_service.get_ground_truth_history(
             db,
@@ -239,16 +384,64 @@ def get_ground_truth_history(
             request_id=request_id,
         )
 
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        total = payload.get("total", 0) if isinstance(payload, dict) else 0
+
+        logger.info(
+            "Ground truth history returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "history_ground_truth_success",
+                    "limit": limit,
+                    "offset": offset,
+                    "client_id": client_id,
+                    "request_id": request_id,
+                    "returned_items": len(items) if isinstance(items, list) else 0,
+                    "total": total,
+                }
+            },
+        )
+
         return GroundTruthHistoryResponse.model_validate(payload)
 
     except HTTPException:
         raise
+
     except ValueError as exc:
+        logger.warning(
+            "Ground truth history request rejected",
+            extra={
+                "extra_data": {
+                    "event": "history_ground_truth_value_error",
+                    "limit": limit,
+                    "offset": offset,
+                    "client_id": client_id,
+                    "request_id": request_id,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Erreur lors de la récupération des vérités terrain : {exc}",
         ) from exc
+
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving ground truth history",
+            extra={
+                "extra_data": {
+                    "event": "history_ground_truth_exception",
+                    "limit": limit,
+                    "offset": offset,
+                    "client_id": client_id,
+                    "request_id": request_id,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération des vérités terrain : {exc}",
@@ -272,6 +465,16 @@ def get_prediction_features_snapshot(
     """
     Retourne le snapshot des features enregistré pour une requête.
     """
+    logger.info(
+        "Prediction feature snapshot requested",
+        extra={
+            "extra_data": {
+                "event": "history_features_snapshot_start",
+                "request_id": request_id,
+            }
+        },
+    )
+
     try:
         result = history_service.get_prediction_features_snapshot(
             db,
@@ -279,21 +482,73 @@ def get_prediction_features_snapshot(
         )
 
         if result is None:
+            logger.warning(
+                "Prediction feature snapshot not found",
+                extra={
+                    "extra_data": {
+                        "event": "history_features_snapshot_not_found",
+                        "request_id": request_id,
+                    }
+                },
+            )
+
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Aucun snapshot de features trouvé pour request_id={request_id}",
             )
 
-        return PredictionFeaturesSnapshotResponse.model_validate(result)
+        items = result.get("items", []) if isinstance(result, dict) else []
+
+        logger.info(
+            "Prediction feature snapshot returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "history_features_snapshot_success",
+                    "request_id": request_id,
+                    "returned_items": len(items) if isinstance(items, list) else 0,
+                }
+            },
+        )
+
+        items = result.get("items", []) if isinstance(result, dict) else []
+
+        return PredictionFeaturesSnapshotResponse(
+            request_id=request_id,
+            features=items if isinstance(items, list) else [],
+)
 
     except HTTPException:
         raise
+
     except ValueError as exc:
+        logger.warning(
+            "Prediction feature snapshot request rejected",
+            extra={
+                "extra_data": {
+                    "event": "history_features_snapshot_value_error",
+                    "request_id": request_id,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Erreur lors de la récupération du snapshot de features : {exc}",
         ) from exc
+
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving prediction feature snapshot",
+            extra={
+                "extra_data": {
+                    "event": "history_features_snapshot_exception",
+                    "request_id": request_id,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération du snapshot de features : {exc}",

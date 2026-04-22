@@ -26,6 +26,7 @@ Notes
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -34,6 +35,9 @@ from sqlalchemy.orm import Session
 from app.crud import monitoring as monitoring_crud
 from app.crud import prediction as prediction_crud
 from app.model.model_SQLalchemy import Alert, ModelRegistry
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -84,10 +88,36 @@ class MonitoringService:
         """
         Retourne le modèle actif le plus récent.
         """
-        return monitoring_crud.get_active_model_record(
+        logger.info(
+            "Monitoring service loading active model",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_active_model_start",
+                    "model_name": model_name,
+                }
+            },
+        )
+
+        entity = monitoring_crud.get_active_model_record(
             self.db,
             model_name=model_name,
         )
+
+        logger.info(
+            "Monitoring service loaded active model",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_active_model_success",
+                    "requested_model_name": model_name,
+                    "found": entity is not None,
+                    "model_name": entity.model_name if entity is not None else None,
+                    "model_version": entity.model_version if entity is not None else None,
+                    "stage": entity.stage if entity is not None else None,
+                }
+            },
+        )
+
+        return entity
 
     def get_models(
         self,
@@ -99,6 +129,18 @@ class MonitoringService:
         """
         Retourne les versions de modèles enregistrées.
         """
+        logger.info(
+            "Monitoring service loading model registry",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_models_start",
+                    "limit": limit,
+                    "model_name": model_name,
+                    "is_active": is_active,
+                }
+            },
+        )
+
         rows = monitoring_crud.list_model_records(
             self.db,
             limit=limit,
@@ -106,7 +148,7 @@ class MonitoringService:
             is_active=is_active,
         )
 
-        return {
+        payload = {
             "count": len(rows),
             "items": [
                 {
@@ -128,6 +170,21 @@ class MonitoringService:
             ],
         }
 
+        logger.info(
+            "Monitoring service loaded model registry",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_models_success",
+                    "limit": limit,
+                    "model_name": model_name,
+                    "is_active": is_active,
+                    "count": payload["count"],
+                }
+            },
+        )
+
+        return payload
+
     def register_model_version(
         self,
         *,
@@ -146,6 +203,20 @@ class MonitoringService:
         """
         Enregistre ou met à jour une version de modèle.
         """
+        logger.info(
+            "Monitoring service registering model version",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_register_model_start",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "stage": stage,
+                    "is_active": is_active,
+                    "run_id": run_id,
+                }
+            },
+        )
+
         entity = monitoring_crud.get_model_record_by_name_version(
             self.db,
             model_name=model_name,
@@ -167,6 +238,7 @@ class MonitoringService:
                 deployed_at=deployed_at,
                 is_active=is_active,
             )
+            action = "created"
         else:
             entity = monitoring_crud.update_model_record(
                 self.db,
@@ -181,6 +253,7 @@ class MonitoringService:
                 deployed_at=deployed_at,
                 is_active=is_active,
             )
+            action = "updated"
 
         if is_active:
             monitoring_crud.deactivate_other_model_versions(
@@ -189,7 +262,7 @@ class MonitoringService:
                 keep_model_id=entity.id,
             )
 
-        return {
+        payload = {
             "message": "Version de modèle enregistrée avec succès.",
             "model_name": entity.model_name,
             "model_version": entity.model_version,
@@ -197,6 +270,22 @@ class MonitoringService:
             "is_active": entity.is_active,
             "deployed_at": entity.deployed_at,
         }
+
+        logger.info(
+            "Monitoring service registered model version",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_register_model_success",
+                    "action": action,
+                    "model_name": entity.model_name,
+                    "model_version": entity.model_version,
+                    "stage": entity.stage,
+                    "is_active": entity.is_active,
+                }
+            },
+        )
+
+        return payload
 
     # =========================================================================
     # Drift metrics
@@ -221,6 +310,20 @@ class MonitoringService:
         """
         Journalise une métrique de drift via la couche CRUD.
         """
+        logger.info(
+            "Monitoring service logging drift metric",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_log_drift_start",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "feature_name": feature_name,
+                    "metric_name": metric_name,
+                    "drift_detected": drift_detected,
+                }
+            },
+        )
+
         entity = monitoring_crud.create_drift_metric_record(
             self.db,
             model_name=model_name,
@@ -238,7 +341,7 @@ class MonitoringService:
             computed_at=_utc_now(),
         )
 
-        return {
+        payload = {
             "id": entity.id,
             "model_name": entity.model_name,
             "model_version": entity.model_version,
@@ -247,6 +350,23 @@ class MonitoringService:
             "drift_detected": entity.drift_detected,
             "computed_at": entity.computed_at,
         }
+
+        logger.info(
+            "Monitoring service logged drift metric",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_log_drift_success",
+                    "id": entity.id,
+                    "model_name": entity.model_name,
+                    "model_version": entity.model_version,
+                    "feature_name": entity.feature_name,
+                    "metric_name": entity.metric_name,
+                    "drift_detected": entity.drift_detected,
+                }
+            },
+        )
+
+        return payload
 
     def get_drift_metrics(
         self,
@@ -263,6 +383,21 @@ class MonitoringService:
         """
         Retourne les métriques de drift.
         """
+        logger.info(
+            "Monitoring service loading drift metrics",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_get_drift_start",
+                    "limit": limit,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "feature_name": feature_name,
+                    "metric_name": metric_name,
+                    "drift_detected": drift_detected,
+                }
+            },
+        )
+
         rows = monitoring_crud.list_drift_metrics(
             self.db,
             limit=limit,
@@ -275,7 +410,7 @@ class MonitoringService:
             window_end=window_end,
         )
 
-        return {
+        payload = {
             "count": len(rows),
             "items": [
                 {
@@ -297,6 +432,20 @@ class MonitoringService:
                 for row in rows
             ],
         }
+
+        logger.info(
+            "Monitoring service loaded drift metrics",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_get_drift_success",
+                    "count": payload["count"],
+                    "model_name": model_name,
+                    "model_version": model_version,
+                }
+            },
+        )
+
+        return payload
 
     # =========================================================================
     # Evaluation metrics
@@ -326,6 +475,19 @@ class MonitoringService:
         """
         Enregistre des métriques d'évaluation via la couche CRUD.
         """
+        logger.info(
+            "Monitoring service logging evaluation metrics",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_log_evaluation_start",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "dataset_name": dataset_name,
+                    "sample_size": sample_size,
+                }
+            },
+        )
+
         entity = monitoring_crud.create_evaluation_metric_record(
             self.db,
             model_name=model_name,
@@ -348,13 +510,28 @@ class MonitoringService:
             computed_at=_utc_now(),
         )
 
-        return {
+        payload = {
             "id": entity.id,
             "model_name": entity.model_name,
             "model_version": entity.model_version,
             "dataset_name": entity.dataset_name,
             "computed_at": entity.computed_at,
         }
+
+        logger.info(
+            "Monitoring service logged evaluation metrics",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_log_evaluation_success",
+                    "id": entity.id,
+                    "model_name": entity.model_name,
+                    "model_version": entity.model_version,
+                    "dataset_name": entity.dataset_name,
+                }
+            },
+        )
+
+        return payload
 
     def get_evaluation_metrics(
         self,
@@ -369,6 +546,19 @@ class MonitoringService:
         """
         Retourne les métriques d'évaluation.
         """
+        logger.info(
+            "Monitoring service loading evaluation metrics",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_get_evaluation_start",
+                    "limit": limit,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "dataset_name": dataset_name,
+                }
+            },
+        )
+
         rows = monitoring_crud.list_evaluation_metrics(
             self.db,
             limit=limit,
@@ -379,7 +569,7 @@ class MonitoringService:
             window_end=window_end,
         )
 
-        return {
+        payload = {
             "count": len(rows),
             "items": [
                 {
@@ -407,6 +597,21 @@ class MonitoringService:
             ],
         }
 
+        logger.info(
+            "Monitoring service loaded evaluation metrics",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_get_evaluation_success",
+                    "count": payload["count"],
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "dataset_name": dataset_name,
+                }
+            },
+        )
+
+        return payload
+
     # =========================================================================
     # Feature store
     # =========================================================================
@@ -427,6 +632,22 @@ class MonitoringService:
         """
         Retourne le feature store de monitoring.
         """
+        logger.info(
+            "Monitoring service loading feature store",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_feature_store_start",
+                    "limit": limit,
+                    "request_id": request_id,
+                    "client_id": client_id,
+                    "feature_name": feature_name,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "source_table": source_table,
+                }
+            },
+        )
+
         rows = monitoring_crud.list_feature_store_records(
             self.db,
             limit=limit,
@@ -440,7 +661,7 @@ class MonitoringService:
             window_end=window_end,
         )
 
-        return {
+        payload = {
             "count": len(rows),
             "items": [
                 {
@@ -458,6 +679,22 @@ class MonitoringService:
                 for row in rows
             ],
         }
+
+        logger.info(
+            "Monitoring service loaded feature store",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_feature_store_success",
+                    "count": payload["count"],
+                    "request_id": request_id,
+                    "client_id": client_id,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                }
+            },
+        )
+
+        return payload
 
     # =========================================================================
     # Alertes
@@ -479,7 +716,22 @@ class MonitoringService:
         """
         Crée une alerte de monitoring via la couche CRUD.
         """
-        return monitoring_crud.create_alert_record(
+        logger.info(
+            "Monitoring service creating alert",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_create_alert_start",
+                    "alert_type": alert_type,
+                    "severity": severity,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "feature_name": feature_name,
+                    "status": status,
+                }
+            },
+        )
+
+        alert = monitoring_crud.create_alert_record(
             self.db,
             alert_type=alert_type,
             severity=severity,
@@ -492,6 +744,21 @@ class MonitoringService:
             status=status,
             created_at=_utc_now(),
         )
+
+        logger.info(
+            "Monitoring service created alert",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_create_alert_success",
+                    "alert_id": alert.id,
+                    "alert_type": alert.alert_type,
+                    "severity": alert.severity,
+                    "status": alert.status,
+                }
+            },
+        )
+
+        return alert
 
     def get_recent_alerts(
         self,
@@ -507,7 +774,23 @@ class MonitoringService:
         """
         Retourne les alertes récentes.
         """
-        return monitoring_crud.list_alert_records(
+        logger.info(
+            "Monitoring service loading recent alerts",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_get_alerts_start",
+                    "limit": limit,
+                    "status": status,
+                    "severity": severity,
+                    "alert_type": alert_type,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "feature_name": feature_name,
+                }
+            },
+        )
+
+        alerts = monitoring_crud.list_alert_records(
             self.db,
             limit=limit,
             status=status,
@@ -518,49 +801,138 @@ class MonitoringService:
             feature_name=feature_name,
         )
 
+        logger.info(
+            "Monitoring service loaded recent alerts",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_get_alerts_success",
+                    "count": len(alerts),
+                    "status": status,
+                    "severity": severity,
+                    "alert_type": alert_type,
+                }
+            },
+        )
+
+        return alerts
+
     def acknowledge_alert(self, alert_id: int) -> Alert | None:
         """
         Marque une alerte comme reconnue.
         """
+        logger.info(
+            "Monitoring service acknowledging alert",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_ack_alert_start",
+                    "alert_id": alert_id,
+                }
+            },
+        )
+
         alert = monitoring_crud.get_alert_by_id(
             self.db,
             alert_id=alert_id,
         )
 
         if alert is None:
+            logger.warning(
+                "Monitoring service could not find alert to acknowledge",
+                extra={
+                    "extra_data": {
+                        "event": "monitoring_service_ack_alert_not_found",
+                        "alert_id": alert_id,
+                    }
+                },
+            )
             return None
 
         if alert.status == "resolved":
+            logger.info(
+                "Monitoring service acknowledge skipped because alert is already resolved",
+                extra={
+                    "extra_data": {
+                        "event": "monitoring_service_ack_alert_already_resolved",
+                        "alert_id": alert.id,
+                        "status": alert.status,
+                    }
+                },
+            )
             return alert
 
-        return monitoring_crud.update_alert_status(
+        updated = monitoring_crud.update_alert_status(
             self.db,
             alert=alert,
             status="acknowledged",
             acknowledged_at=_utc_now(),
         )
 
+        logger.info(
+            "Monitoring service acknowledged alert",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_ack_alert_success",
+                    "alert_id": updated.id,
+                    "status": updated.status,
+                }
+            },
+        )
+
+        return updated
+
     def resolve_alert(self, alert_id: int) -> Alert | None:
         """
         Marque une alerte comme résolue.
         """
+        logger.info(
+            "Monitoring service resolving alert",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_resolve_alert_start",
+                    "alert_id": alert_id,
+                }
+            },
+        )
+
         alert = monitoring_crud.get_alert_by_id(
             self.db,
             alert_id=alert_id,
         )
 
         if alert is None:
+            logger.warning(
+                "Monitoring service could not find alert to resolve",
+                extra={
+                    "extra_data": {
+                        "event": "monitoring_service_resolve_alert_not_found",
+                        "alert_id": alert_id,
+                    }
+                },
+            )
             return None
 
         acknowledged_at = alert.acknowledged_at or _utc_now()
 
-        return monitoring_crud.update_alert_status(
+        updated = monitoring_crud.update_alert_status(
             self.db,
             alert=alert,
             status="resolved",
             acknowledged_at=acknowledged_at,
             resolved_at=_utc_now(),
         )
+
+        logger.info(
+            "Monitoring service resolved alert",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_resolve_alert_success",
+                    "alert_id": updated.id,
+                    "status": updated.status,
+                }
+            },
+        )
+
+        return updated
 
     # =========================================================================
     # Synthèse monitoring
@@ -577,6 +949,19 @@ class MonitoringService:
         """
         Retourne une synthèse complète du monitoring.
         """
+        logger.info(
+            "Monitoring service computing monitoring summary",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_summary_start",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "window_start": window_start.isoformat() if window_start else None,
+                    "window_end": window_end.isoformat() if window_end else None,
+                }
+            },
+        )
+
         total_predictions = prediction_crud.count_prediction_logs(
             self.db,
             model_name=model_name,
@@ -692,7 +1077,7 @@ class MonitoringService:
                 "computed_at": latest_evaluation.computed_at,
             }
 
-        return {
+        payload = {
             "model_name": model_name,
             "model_version": model_version,
             "window_start": window_start,
@@ -724,6 +1109,24 @@ class MonitoringService:
             },
         }
 
+        logger.info(
+            "Monitoring service computed monitoring summary",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_summary_success",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "total_predictions": total_predictions,
+                    "total_errors": total_errors,
+                    "total_drift_metrics": total_drift_metrics,
+                    "detected_drifts": detected_drifts,
+                    "open_alerts": open_alerts,
+                }
+            },
+        )
+
+        return payload
+
     def get_monitoring_health(
         self,
         *,
@@ -735,6 +1138,17 @@ class MonitoringService:
         """
         Retourne un état simple et lisible du monitoring.
         """
+        logger.info(
+            "Monitoring service computing monitoring health",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_health_start",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                }
+            },
+        )
+
         summary = self.get_monitoring_summary(
             model_name=model_name,
             model_version=model_version,
@@ -747,7 +1161,7 @@ class MonitoringService:
         drift = summary.get("drift", {})
         alerts = summary.get("alerts", {})
 
-        return {
+        payload = {
             "model_name": summary.get("model_name"),
             "model_version": summary.get("model_version"),
             "window_start": summary.get("window_start"),
@@ -765,3 +1179,20 @@ class MonitoringService:
                 else None
             ),
         }
+
+        logger.info(
+            "Monitoring service computed monitoring health",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_health_success",
+                    "model_name": payload["model_name"],
+                    "model_version": payload["model_version"],
+                    "has_predictions": payload["has_predictions"],
+                    "has_drift_metrics": payload["has_drift_metrics"],
+                    "has_latest_evaluation": payload["has_latest_evaluation"],
+                    "open_alerts": payload["open_alerts"],
+                }
+            },
+        )
+
+        return payload

@@ -3,7 +3,7 @@ Service de prédiction du modèle de scoring crédit.
 
 Ce module encapsule la logique métier liée à l'inférence du modèle.
 Il ne recharge pas le modèle à chaque appel : le modèle et le seuil
-de décision sont récupérés depuis `app.services.model_loader_service`,
+de décision sont récupérés depuis `app.services.model_loading_service`,
 qui les charge une seule fois au démarrage de l'application.
 
 Fonctionnalités
@@ -26,7 +26,7 @@ Notes
 -----
 - Le score retourné correspond à la probabilité de la classe positive.
 - La décision finale est calculée avec le seuil chargé depuis
-  `app.services.model_loader_service`.
+  `app.services.model_loading_service`.
 - Les simulations "réelles" utilisent les clients présents dans
   la source applicative configurée.
 - Les commits et rollbacks sont gérés par l'appelant.
@@ -34,6 +34,7 @@ Notes
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 import uuid
@@ -48,8 +49,11 @@ from app.services.data_loader_service import (
     get_features_for_client_from_cache,
 )
 from app.services.features_builder_service import build_features_from_loaded_data
-from app.services.model_loader_service import get_model, get_threshold
+from app.services.model_loading_service import get_model, get_threshold
 from app.services.prediction_logging_service import PredictionLoggingService
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -156,12 +160,37 @@ def _predict_scores(df: pd.DataFrame) -> pd.Series:
             "Le modèle chargé ne possède pas de méthode `predict_proba`."
         )
 
+    logger.info(
+        "Computing prediction probabilities",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_predict_scores_start",
+                "rows": len(df),
+                "columns": len(df.columns),
+                "model_name": MODEL_NAME,
+                "model_version": MODEL_VERSION,
+            }
+        },
+    )
+
     proba = model.predict_proba(df)
 
     if len(proba.shape) != 2 or proba.shape[1] < 2:
         raise ValueError(
             "La sortie de `predict_proba` ne contient pas deux colonnes de probabilités."
         )
+
+    logger.info(
+        "Prediction probabilities computed successfully",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_predict_scores_success",
+                "rows": len(df),
+                "columns": len(df.columns),
+                "output_columns": int(proba.shape[1]),
+            }
+        },
+    )
 
     return pd.Series(proba[:, 1], index=df.index, dtype="float64")
 
@@ -175,6 +204,19 @@ def _predict_raw(features: dict[str, Any]) -> tuple[int, float, float]:
 
     score = float(_predict_scores(df).iloc[0])
     prediction = int(score >= threshold)
+
+    logger.info(
+        "Raw prediction computed",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_predict_raw_success",
+                "prediction": prediction,
+                "score": score,
+                "threshold_used": threshold,
+                "feature_count": len(features),
+            }
+        },
+    )
 
     return prediction, score, threshold
 
@@ -195,7 +237,7 @@ def _extract_application_df() -> pd.DataFrame:
     if isinstance(cache, dict):
         if "application" in cache:
             df = cache["application"]
-        elif "application_test" in cache:  # compat legacy
+        elif "application_test" in cache:
             df = cache["application_test"]
         elif "app" in cache:
             df = cache["app"]
@@ -241,6 +283,17 @@ def extract_existing_client_ids(
             f"Aucun identifiant client exploitable trouvé dans `{client_id_column}`."
         )
 
+    logger.info(
+        "Existing client IDs extracted",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_extract_client_ids_success",
+                "client_id_column": client_id_column,
+                "count": len(client_ids),
+            }
+        },
+    )
+
     return client_ids
 
 
@@ -267,7 +320,22 @@ def get_random_existing_client_ids(
         )
 
     rng = random.Random(random_seed)
-    return rng.sample(client_ids, limit)
+    selected = rng.sample(client_ids, limit)
+
+    logger.info(
+        "Random existing client IDs selected",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_select_random_client_ids_success",
+                "requested_limit": limit,
+                "available_clients": len(client_ids),
+                "selected_count": len(selected),
+                "random_seed": random_seed,
+            }
+        },
+    )
+
+    return selected
 
 
 def _load_client_source_dataframe() -> pd.DataFrame:
@@ -359,6 +427,19 @@ def _build_random_feature_rows_from_application(
 
         generated_rows.append(row)
 
+    logger.info(
+        "Random artificial feature rows built from application profile",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_build_random_rows_success",
+                "requested_limit": limit,
+                "generated_rows": len(generated_rows),
+                "sample_size": len(sample_df),
+                "columns": len(columns),
+            }
+        },
+    )
+
     return generated_rows
 
 
@@ -405,10 +486,23 @@ def _get_features_for_client(client_id: int) -> dict[str, Any]:
         keep_id=False,
     )
 
-    return _get_single_row_feature_dict(
+    features = _get_single_row_feature_dict(
         client_df,
         context=f"Les features du client {client_id}",
     )
+
+    logger.info(
+        "Features retrieved for client from cache",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_get_client_features_success",
+                "client_id": int(client_id),
+                "feature_count": len(features),
+            }
+        },
+    )
+
+    return features
 
 
 # =============================================================================
@@ -416,7 +510,7 @@ def _get_features_for_client(client_id: int) -> dict[str, Any]:
 # =============================================================================
 
 def _log_success_prediction(
-    logger: PredictionLoggingService,
+    prediction_logger: PredictionLoggingService,
     *,
     request_id: str,
     client_id: int | None,
@@ -432,7 +526,7 @@ def _log_success_prediction(
     """
     features_df = pd.DataFrame([features])
 
-    logger.log_full_prediction_event(
+    prediction_logger.log_full_prediction_event(
         request_id=request_id,
         model_name=MODEL_NAME,
         model_version=MODEL_VERSION,
@@ -459,7 +553,7 @@ def _log_success_prediction(
 
 
 def _log_error_prediction(
-    logger: PredictionLoggingService,
+    prediction_logger: PredictionLoggingService,
     *,
     request_id: str,
     client_id: int | None,
@@ -471,7 +565,7 @@ def _log_error_prediction(
     """
     Journalise une erreur de prédiction.
     """
-    logger.log_prediction_error(
+    prediction_logger.log_prediction_error(
         request_id=request_id,
         model_name=MODEL_NAME,
         model_version=MODEL_VERSION,
@@ -556,10 +650,34 @@ def make_prediction(
     """
     clean_features = _clean_feature_dict(features)
 
-    if db is None:
-        return _predict_raw(clean_features)
+    logger.info(
+        "Single prediction requested in prediction service",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_single_start",
+                "client_id": client_id,
+                "source_table": source_table,
+                "has_db_session": db is not None,
+                "feature_count": len(clean_features),
+            }
+        },
+    )
 
-    logger = PredictionLoggingService(db=db)
+    if db is None:
+        result = _predict_raw(clean_features)
+        logger.info(
+            "Single prediction completed without DB logging",
+            extra={
+                "extra_data": {
+                    "event": "prediction_service_single_no_db_success",
+                    "client_id": client_id,
+                    "source_table": source_table,
+                }
+            },
+        )
+        return result
+
+    prediction_logger = PredictionLoggingService(db=db)
     request_id = str(uuid.uuid4())
     start_time = time.perf_counter()
 
@@ -568,7 +686,7 @@ def make_prediction(
         latency_ms = (time.perf_counter() - start_time) * 1000
 
         _log_success_prediction(
-            logger,
+            prediction_logger,
             request_id=request_id,
             client_id=client_id,
             features=clean_features,
@@ -579,7 +697,7 @@ def make_prediction(
             source_table=source_table,
         )
 
-        return {
+        payload = {
             "request_id": request_id,
             "client_id": client_id,
             "prediction": prediction,
@@ -591,12 +709,44 @@ def make_prediction(
             "status": "success",
         }
 
+        logger.info(
+            "Single prediction completed with DB logging",
+            extra={
+                "extra_data": {
+                    "event": "prediction_service_single_success",
+                    "request_id": request_id,
+                    "client_id": client_id,
+                    "prediction": prediction,
+                    "score": score,
+                    "threshold_used": threshold_used,
+                    "latency_ms": latency_ms,
+                    "source_table": source_table,
+                }
+            },
+        )
+
+        return payload
+
     except Exception as exc:
         latency_ms = (time.perf_counter() - start_time) * 1000
 
+        logger.exception(
+            "Unexpected error during single prediction",
+            extra={
+                "extra_data": {
+                    "event": "prediction_service_single_exception",
+                    "request_id": request_id,
+                    "client_id": client_id,
+                    "latency_ms": latency_ms,
+                    "source_table": source_table,
+                    "error": str(exc),
+                }
+            },
+        )
+
         try:
             _log_error_prediction(
-                logger,
+                prediction_logger,
                 request_id=request_id,
                 client_id=client_id,
                 input_data=clean_features,
@@ -604,8 +754,18 @@ def make_prediction(
                 latency_ms=latency_ms,
                 status_code=500,
             )
-        except Exception:
-            pass
+        except Exception as log_exc:
+            logger.exception(
+                "Failed to log single prediction error",
+                extra={
+                    "extra_data": {
+                        "event": "prediction_service_single_error_log_exception",
+                        "request_id": request_id,
+                        "client_id": client_id,
+                        "error": str(log_exc),
+                    }
+                },
+            )
 
         raise
 
@@ -624,6 +784,18 @@ def make_prediction_from_client_id(
     - sans `db` : retourne (prediction, score, threshold_used)
     - avec `db` : journalise et retourne un dictionnaire complet
     """
+    logger.info(
+        "Prediction from client_id requested in prediction service",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_client_id_start",
+                "client_id": int(client_id),
+                "source_table": source_table,
+                "has_db_session": db is not None,
+            }
+        },
+    )
+
     features = _get_features_for_client(int(client_id))
 
     return make_prediction(
@@ -646,7 +818,32 @@ def make_prediction_from_dataframe(df: pd.DataFrame) -> tuple[int, float, float]
         )
 
     features = _clean_feature_dict(df.iloc[0].to_dict())
-    return _predict_raw(features)
+
+    logger.info(
+        "Single prediction from dataframe requested",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_dataframe_start",
+                "rows": len(df),
+                "columns": len(df.columns),
+            }
+        },
+    )
+
+    result = _predict_raw(features)
+
+    logger.info(
+        "Single prediction from dataframe completed",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_dataframe_success",
+                "rows": len(df),
+                "columns": len(df.columns),
+            }
+        },
+    )
+
+    return result
 
 
 def predict_one_row(df: pd.DataFrame) -> dict[str, Any]:
@@ -673,6 +870,17 @@ def make_batch_prediction(df: pd.DataFrame) -> pd.DataFrame:
     df = _ensure_dataframe(df)
     _ensure_batch_size(len(df))
 
+    logger.info(
+        "Batch prediction without DB logging requested",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_batch_no_db_start",
+                "batch_size": len(df),
+                "columns": len(df.columns),
+            }
+        },
+    )
+
     rows: list[dict[str, Any]] = []
 
     for _, row in df.iterrows():
@@ -686,7 +894,20 @@ def make_batch_prediction(df: pd.DataFrame) -> pd.DataFrame:
 
         rows.append(enriched_row)
 
-    return pd.DataFrame(rows)
+    result_df = pd.DataFrame(rows)
+
+    logger.info(
+        "Batch prediction without DB logging completed",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_batch_no_db_success",
+                "batch_size": len(df),
+                "result_rows": len(result_df),
+            }
+        },
+    )
+
+    return result_df
 
 
 def run_batch_prediction(
@@ -709,7 +930,18 @@ def run_batch_prediction(
     _ensure_non_string_sequence(payloads, "payloads")
     _ensure_batch_size(len(payloads))
 
-    logger = PredictionLoggingService(db=db)
+    logger.info(
+        "Batch prediction with payloads requested",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_batch_payloads_start",
+                "batch_size": len(payloads),
+                "source_table": source_table,
+            }
+        },
+    )
+
+    prediction_logger = PredictionLoggingService(db=db)
     batch_start_time = time.perf_counter()
 
     items: list[dict[str, Any]] = []
@@ -732,7 +964,7 @@ def run_batch_prediction(
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             _log_success_prediction(
-                logger,
+                prediction_logger,
                 request_id=request_id,
                 client_id=client_id,
                 features=clean_features,
@@ -758,9 +990,23 @@ def run_batch_prediction(
         except Exception as exc:
             latency_ms = (time.perf_counter() - start_time) * 1000
 
+            logger.exception(
+                "Unexpected error during batch payload prediction item",
+                extra={
+                    "extra_data": {
+                        "event": "prediction_service_batch_payload_item_exception",
+                        "request_id": request_id,
+                        "client_id": client_id,
+                        "source_table": source_table,
+                        "latency_ms": latency_ms,
+                        "error": str(exc),
+                    }
+                },
+            )
+
             try:
                 _log_error_prediction(
-                    logger,
+                    prediction_logger,
                     request_id=request_id,
                     client_id=client_id,
                     input_data=(
@@ -770,8 +1016,18 @@ def run_batch_prediction(
                     latency_ms=latency_ms,
                     status_code=500,
                 )
-            except Exception:
-                pass
+            except Exception as log_exc:
+                logger.exception(
+                    "Failed to log batch payload prediction error",
+                    extra={
+                        "extra_data": {
+                            "event": "prediction_service_batch_payload_item_error_log_exception",
+                            "request_id": request_id,
+                            "client_id": client_id,
+                            "error": str(log_exc),
+                        }
+                    },
+                )
 
             items.append(
                 _build_error_item(
@@ -785,7 +1041,7 @@ def run_batch_prediction(
 
     batch_latency_ms = (time.perf_counter() - batch_start_time) * 1000
 
-    return {
+    payload = {
         "batch_size": len(payloads),
         "success_count": success_count,
         "error_count": error_count,
@@ -794,6 +1050,22 @@ def run_batch_prediction(
         "batch_latency_ms": batch_latency_ms,
         "items": items,
     }
+
+    logger.info(
+        "Batch prediction with payloads completed",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_batch_payloads_success",
+                "batch_size": len(payloads),
+                "success_count": success_count,
+                "error_count": error_count,
+                "batch_latency_ms": batch_latency_ms,
+                "source_table": source_table,
+            }
+        },
+    )
+
+    return payload
 
 
 # =============================================================================
@@ -817,7 +1089,18 @@ def predict_batch_from_client_ids(
     _ensure_non_string_sequence(client_ids, "client_ids")
     _ensure_batch_size(len(client_ids))
 
-    logger = PredictionLoggingService(db=db)
+    logger.info(
+        "Batch prediction from client IDs requested",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_batch_client_ids_start",
+                "batch_size": len(client_ids),
+                "source_table": source_table,
+            }
+        },
+    )
+
+    prediction_logger = PredictionLoggingService(db=db)
     batch_start_time = time.perf_counter()
 
     items: list[dict[str, Any]] = []
@@ -841,7 +1124,7 @@ def predict_batch_from_client_ids(
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             _log_success_prediction(
-                logger,
+                prediction_logger,
                 request_id=request_id,
                 client_id=int(client_id),
                 features=clean_features,
@@ -868,9 +1151,23 @@ def predict_batch_from_client_ids(
             latency_ms = (time.perf_counter() - start_time) * 1000
             safe_client_id = int(client_id) if pd.notna(client_id) else None
 
+            logger.exception(
+                "Unexpected error during batch client prediction item",
+                extra={
+                    "extra_data": {
+                        "event": "prediction_service_batch_client_item_exception",
+                        "request_id": request_id,
+                        "client_id": safe_client_id,
+                        "source_table": source_table,
+                        "latency_ms": latency_ms,
+                        "error": str(exc),
+                    }
+                },
+            )
+
             try:
                 _log_error_prediction(
-                    logger,
+                    prediction_logger,
                     request_id=request_id,
                     client_id=safe_client_id,
                     input_data={"client_id": client_id},
@@ -878,8 +1175,18 @@ def predict_batch_from_client_ids(
                     latency_ms=latency_ms,
                     status_code=500,
                 )
-            except Exception:
-                pass
+            except Exception as log_exc:
+                logger.exception(
+                    "Failed to log batch client prediction error",
+                    extra={
+                        "extra_data": {
+                            "event": "prediction_service_batch_client_item_error_log_exception",
+                            "request_id": request_id,
+                            "client_id": safe_client_id,
+                            "error": str(log_exc),
+                        }
+                    },
+                )
 
             items.append(
                 _build_error_item(
@@ -893,7 +1200,7 @@ def predict_batch_from_client_ids(
 
     batch_latency_ms = (time.perf_counter() - batch_start_time) * 1000
 
-    return {
+    payload = {
         "batch_size": len(client_ids),
         "success_count": success_count,
         "error_count": error_count,
@@ -902,6 +1209,22 @@ def predict_batch_from_client_ids(
         "batch_latency_ms": batch_latency_ms,
         "items": items,
     }
+
+    logger.info(
+        "Batch prediction from client IDs completed",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_batch_client_ids_success",
+                "batch_size": len(client_ids),
+                "success_count": success_count,
+                "error_count": error_count,
+                "batch_latency_ms": batch_latency_ms,
+                "source_table": source_table,
+            }
+        },
+    )
+
+    return payload
 
 
 # =============================================================================
@@ -920,6 +1243,18 @@ def run_real_client_simulation(
     lance les prédictions puis journalise les résultats.
     """
     _ensure_batch_size(limit)
+
+    logger.info(
+        "Real client simulation requested",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_real_simulation_start",
+                "limit": limit,
+                "random_seed": random_seed,
+                "source_table": source_table,
+            }
+        },
+    )
 
     source_df = _load_client_source_dataframe()
 
@@ -940,6 +1275,20 @@ def run_real_client_simulation(
     )
     result["selected_client_ids"] = selected_client_ids
 
+    logger.info(
+        "Real client simulation completed",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_real_simulation_success",
+                "limit": limit,
+                "selected_client_ids_count": len(selected_client_ids),
+                "success_count": result.get("success_count"),
+                "error_count": result.get("error_count"),
+                "source_table": source_table,
+            }
+        },
+    )
+
     return result
 
 
@@ -959,6 +1308,17 @@ def run_random_feature_simulation(
     """
     _ensure_batch_size(limit)
 
+    logger.info(
+        "Random feature simulation requested",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_random_simulation_start",
+                "limit": limit,
+                "source_table": source_table,
+            }
+        },
+    )
+
     raw_rows = _build_random_feature_rows_from_application(limit=limit)
 
     if not raw_rows:
@@ -975,7 +1335,7 @@ def run_random_feature_simulation(
 
     model_ready_df = _ensure_dataframe(model_ready_df)
 
-    logger = PredictionLoggingService(db=db)
+    prediction_logger = PredictionLoggingService(db=db)
     batch_start_time = time.perf_counter()
 
     items: list[dict[str, Any]] = []
@@ -993,7 +1353,7 @@ def run_random_feature_simulation(
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             _log_success_prediction(
-                logger,
+                prediction_logger,
                 request_id=request_id,
                 client_id=client_id,
                 features=features,
@@ -1019,9 +1379,23 @@ def run_random_feature_simulation(
         except Exception as exc:
             latency_ms = (time.perf_counter() - start_time) * 1000
 
+            logger.exception(
+                "Unexpected error during random feature simulation item",
+                extra={
+                    "extra_data": {
+                        "event": "prediction_service_random_simulation_item_exception",
+                        "request_id": request_id,
+                        "client_id": client_id,
+                        "source_table": source_table,
+                        "latency_ms": latency_ms,
+                        "error": str(exc),
+                    }
+                },
+            )
+
             try:
                 _log_error_prediction(
-                    logger,
+                    prediction_logger,
                     request_id=request_id,
                     client_id=client_id,
                     input_data=features,
@@ -1029,8 +1403,18 @@ def run_random_feature_simulation(
                     latency_ms=latency_ms,
                     status_code=500,
                 )
-            except Exception:
-                pass
+            except Exception as log_exc:
+                logger.exception(
+                    "Failed to log random feature simulation error",
+                    extra={
+                        "extra_data": {
+                            "event": "prediction_service_random_simulation_item_error_log_exception",
+                            "request_id": request_id,
+                            "client_id": client_id,
+                            "error": str(log_exc),
+                        }
+                    },
+                )
 
             items.append(
                 _build_error_item(
@@ -1044,7 +1428,7 @@ def run_random_feature_simulation(
 
     batch_latency_ms = (time.perf_counter() - batch_start_time) * 1000
 
-    return {
+    payload = {
         "batch_size": len(model_ready_df),
         "success_count": success_count,
         "error_count": error_count,
@@ -1053,6 +1437,22 @@ def run_random_feature_simulation(
         "batch_latency_ms": batch_latency_ms,
         "items": items,
     }
+
+    logger.info(
+        "Random feature simulation completed",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_random_simulation_success",
+                "batch_size": len(model_ready_df),
+                "success_count": success_count,
+                "error_count": error_count,
+                "batch_latency_ms": batch_latency_ms,
+                "source_table": source_table,
+            }
+        },
+    )
+
+    return payload
 
 
 # =============================================================================
@@ -1067,9 +1467,23 @@ def summarize_batch_results(results: Sequence[dict[str, Any]]) -> dict[str, Any]
     success_count = sum(1 for item in results if item.get("status") == "success")
     error_count = total - success_count
 
-    return {
+    payload = {
         "batch_size": total,
         "success_count": success_count,
         "error_count": error_count,
         "items": list(results),
     }
+
+    logger.info(
+        "Batch results summarized",
+        extra={
+            "extra_data": {
+                "event": "prediction_service_summarize_batch_success",
+                "batch_size": total,
+                "success_count": success_count,
+                "error_count": error_count,
+            }
+        },
+    )
+
+    return payload

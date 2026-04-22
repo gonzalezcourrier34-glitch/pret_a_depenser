@@ -21,10 +21,14 @@ Fonctionnalités
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -76,6 +80,22 @@ def get_prediction_history(
     """
     Retourne l'historique des prédictions journalisées.
     """
+    logger.info(
+        "History service loading prediction history",
+        extra={
+            "extra_data": {
+                "event": "history_service_predictions_start",
+                "limit": limit,
+                "offset": offset,
+                "client_id": client_id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "only_errors": only_errors,
+                "prediction_value": prediction_value,
+            }
+        },
+    )
+
     sql = """
     SELECT
         id,
@@ -139,14 +159,28 @@ def get_prediction_history(
                 "model_name": row["model_name"],
                 "model_version": row["model_version"],
                 "prediction": prediction,
+                "prediction_label": _prediction_label_from_value(prediction),
                 "score": row["score"],
                 "threshold_used": row["threshold_used"],
                 "latency_ms": row["latency_ms"],
                 "prediction_timestamp": row["prediction_timestamp"],
                 "status_code": status_code,
+                "status": _status_from_row(error_message, status_code),
                 "error_message": error_message,
             }
         )
+
+    logger.info(
+        "History service loaded prediction history successfully",
+        extra={
+            "extra_data": {
+                "event": "history_service_predictions_success",
+                "returned_items": len(items),
+                "limit": limit,
+                "offset": offset,
+            }
+        },
+    )
 
     return {
         "count": len(items),
@@ -164,6 +198,16 @@ def get_prediction_detail(
     """
     Retourne le détail complet d'une prédiction.
     """
+    logger.info(
+        "History service loading prediction detail",
+        extra={
+            "extra_data": {
+                "event": "history_service_prediction_detail_start",
+                "request_id": request_id,
+            }
+        },
+    )
+
     sql = text(
         """
         SELECT
@@ -190,15 +234,25 @@ def get_prediction_detail(
     row = db.execute(sql, {"request_id": request_id}).mappings().first()
 
     if row is None:
+        logger.warning(
+            "History service did not find prediction detail",
+            extra={
+                "extra_data": {
+                    "event": "history_service_prediction_detail_not_found",
+                    "request_id": request_id,
+                }
+            },
+        )
         return None
 
-    return {
+    result = {
         "id": row["id"],
         "request_id": row["request_id"],
         "client_id": row["client_id"],
         "model_name": row["model_name"],
         "model_version": row["model_version"],
         "prediction": row["prediction"],
+        "prediction_label": _prediction_label_from_value(row["prediction"]),
         "score": row["score"],
         "threshold_used": row["threshold_used"],
         "latency_ms": row["latency_ms"],
@@ -206,8 +260,21 @@ def get_prediction_detail(
         "output_data": row["output_data"],
         "prediction_timestamp": row["prediction_timestamp"],
         "status_code": row["status_code"],
+        "status": _status_from_row(row["error_message"], row["status_code"]),
         "error_message": row["error_message"],
     }
+
+    logger.info(
+        "History service loaded prediction detail successfully",
+        extra={
+            "extra_data": {
+                "event": "history_service_prediction_detail_success",
+                "request_id": request_id,
+            }
+        },
+    )
+
+    return result
 
 
 # =============================================================================
@@ -225,6 +292,19 @@ def get_ground_truth_history(
     """
     Retourne l'historique des vérités terrain enregistrées.
     """
+    logger.info(
+        "History service loading ground truth history",
+        extra={
+            "extra_data": {
+                "event": "history_service_ground_truth_start",
+                "limit": limit,
+                "offset": offset,
+                "client_id": client_id,
+                "request_id": request_id,
+            }
+        },
+    )
+
     sql = """
     SELECT
         id,
@@ -271,6 +351,18 @@ def get_ground_truth_history(
         for row in rows
     ]
 
+    logger.info(
+        "History service loaded ground truth history successfully",
+        extra={
+            "extra_data": {
+                "event": "history_service_ground_truth_success",
+                "returned_items": len(items),
+                "limit": limit,
+                "offset": offset,
+            }
+        },
+    )
+
     return {
         "count": len(items),
         "limit": limit,
@@ -291,6 +383,16 @@ def get_prediction_features_snapshot(
     """
     Retourne le snapshot des features enregistré pour une requête.
     """
+    logger.info(
+        "History service loading prediction feature snapshot",
+        extra={
+            "extra_data": {
+                "event": "history_service_feature_snapshot_start",
+                "request_id": request_id,
+            }
+        },
+    )
+
     sql = text(
         """
         SELECT
@@ -311,18 +413,27 @@ def get_prediction_features_snapshot(
     rows = db.execute(sql, {"request_id": request_id}).mappings().all()
 
     if not rows:
+        logger.warning(
+            "History service did not find feature snapshot",
+            extra={
+                "extra_data": {
+                    "event": "history_service_feature_snapshot_not_found",
+                    "request_id": request_id,
+                }
+            },
+        )
         return None
 
     first_row = rows[0]
 
-    return {
+    result = {
         "request_id": request_id,
         "client_id": first_row["client_id"],
         "model_name": first_row["model_name"],
         "model_version": first_row["model_version"],
         "snapshot_timestamp": first_row["snapshot_timestamp"],
         "feature_count": len(rows),
-        "features": [
+        "items": [
             {
                 "feature_name": row["feature_name"],
                 "feature_value": row["feature_value"],
@@ -331,3 +442,16 @@ def get_prediction_features_snapshot(
             for row in rows
         ],
     }
+
+    logger.info(
+        "History service loaded feature snapshot successfully",
+        extra={
+            "extra_data": {
+                "event": "history_service_feature_snapshot_success",
+                "request_id": request_id,
+                "feature_count": len(rows),
+            }
+        },
+    )
+
+    return result

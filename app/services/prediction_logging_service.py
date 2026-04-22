@@ -22,6 +22,7 @@ Notes
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,9 @@ from app.core.config import APPLICATION_CSV
 from app.crud import monitoring as monitoring_crud
 from app.crud import prediction as prediction_crud
 from app.model.model_SQLalchemy import PredictionLog
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -229,6 +233,21 @@ def dataframe_row_to_feature_records(
             }
         )
 
+    logger.info(
+        "Feature records built from dataframe row",
+        extra={
+            "extra_data": {
+                "event": "prediction_logging_build_feature_records_success",
+                "request_id": request_id,
+                "client_id": client_id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "source_table": resolved_source_table,
+                "feature_count": len(records),
+            }
+        },
+    )
+
     return records
 
 
@@ -274,13 +293,29 @@ class PredictionLoggingService:
         PredictionLog
             Entité SQLAlchemy ajoutée à la session.
         """
+        logger.info(
+            "PredictionLoggingService logging prediction",
+            extra={
+                "extra_data": {
+                    "event": "prediction_logging_log_prediction_start",
+                    "request_id": request_id,
+                    "client_id": client_id,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "prediction": prediction,
+                    "status_code": status_code,
+                    "has_error": error_message is not None,
+                }
+            },
+        )
+
         event_time = event_time or _utc_now()
 
         safe_input_data = _to_json_compatible(input_data)
         if safe_input_data is None:
             safe_input_data = {}
 
-        return prediction_crud.create_prediction_log(
+        entity = prediction_crud.create_prediction_log(
             self.db,
             request_id=request_id,
             client_id=client_id,
@@ -296,6 +331,24 @@ class PredictionLoggingService:
             status_code=status_code,
             error_message=error_message,
         )
+
+        logger.info(
+            "PredictionLoggingService logged prediction successfully",
+            extra={
+                "extra_data": {
+                    "event": "prediction_logging_log_prediction_success",
+                    "id": entity.id,
+                    "request_id": entity.request_id,
+                    "client_id": entity.client_id,
+                    "model_name": entity.model_name,
+                    "model_version": entity.model_version,
+                    "prediction": entity.prediction,
+                    "status_code": entity.status_code,
+                }
+            },
+        )
+
+        return entity
 
     def log_prediction_error(
         self,
@@ -323,6 +376,21 @@ class PredictionLoggingService:
         PredictionLog
             Entité SQLAlchemy ajoutée à la session.
         """
+        logger.warning(
+            "PredictionLoggingService logging prediction error",
+            extra={
+                "extra_data": {
+                    "event": "prediction_logging_log_error_start",
+                    "request_id": request_id,
+                    "client_id": client_id,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "status_code": status_code,
+                    "error_message": error_message,
+                }
+            },
+        )
+
         return self.log_prediction(
             request_id=request_id,
             model_name=model_name,
@@ -355,10 +423,34 @@ class PredictionLoggingService:
 
         event_time = event_time or _utc_now()
 
+        logger.info(
+            "PredictionLoggingService logging feature snapshot",
+            extra={
+                "extra_data": {
+                    "event": "prediction_logging_snapshot_start",
+                    "feature_count": len(feature_records),
+                    "request_id": feature_records[0].get("request_id"),
+                    "model_name": feature_records[0].get("model_name"),
+                    "model_version": feature_records[0].get("model_version"),
+                }
+            },
+        )
+
         prediction_crud.create_feature_snapshots(
             self.db,
             records=feature_records,
             timestamp=event_time,
+        )
+
+        logger.info(
+            "PredictionLoggingService logged feature snapshot successfully",
+            extra={
+                "extra_data": {
+                    "event": "prediction_logging_snapshot_success",
+                    "feature_count": len(feature_records),
+                    "request_id": feature_records[0].get("request_id"),
+                }
+            },
         )
 
     def log_feature_store_monitoring(
@@ -377,10 +469,35 @@ class PredictionLoggingService:
 
         event_time = event_time or _utc_now()
 
+        logger.info(
+            "PredictionLoggingService logging feature store monitoring",
+            extra={
+                "extra_data": {
+                    "event": "prediction_logging_feature_store_start",
+                    "feature_count": len(feature_records),
+                    "request_id": feature_records[0].get("request_id"),
+                    "model_name": feature_records[0].get("model_name"),
+                    "model_version": feature_records[0].get("model_version"),
+                    "source_table": feature_records[0].get("source_table"),
+                }
+            },
+        )
+
         monitoring_crud.create_feature_store_records(
             self.db,
             records=feature_records,
             timestamp=event_time,
+        )
+
+        logger.info(
+            "PredictionLoggingService logged feature store monitoring successfully",
+            extra={
+                "extra_data": {
+                    "event": "prediction_logging_feature_store_success",
+                    "feature_count": len(feature_records),
+                    "request_id": feature_records[0].get("request_id"),
+                }
+            },
         )
 
     def log_full_prediction_event(
@@ -408,6 +525,21 @@ class PredictionLoggingService:
         -----
         Les commits et rollbacks sont gérés par l'appelant.
         """
+        logger.info(
+            "PredictionLoggingService logging full prediction event",
+            extra={
+                "extra_data": {
+                    "event": "prediction_logging_full_event_start",
+                    "request_id": request_id,
+                    "client_id": client_id,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "write_feature_store_monitoring": write_feature_store_monitoring,
+                    "status_code": status_code,
+                }
+            },
+        )
+
         if not isinstance(features_df, pd.DataFrame):
             raise TypeError("`features_df` doit être un DataFrame pandas.")
 
@@ -465,4 +597,20 @@ class PredictionLoggingService:
             status_code=status_code,
             error_message=None,
             event_time=event_time,
+        )
+
+        logger.info(
+            "PredictionLoggingService logged full prediction event successfully",
+            extra={
+                "extra_data": {
+                    "event": "prediction_logging_full_event_success",
+                    "request_id": request_id,
+                    "client_id": client_id,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "prediction": prediction,
+                    "source_table": resolved_source_table,
+                    "feature_count": len(feature_records),
+                }
+            },
         )

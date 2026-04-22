@@ -42,6 +42,7 @@ Notes
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -50,6 +51,10 @@ import pandas as pd
 
 from app.core.config import APPLICATION_CSV
 from app.core.model_features import MODEL_FEATURES
+
+
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # Colonnes de base attendues depuis la source CSV applicative
@@ -145,11 +150,11 @@ APPLICATION_BASE_COLUMNS = [
 
 def _debug_title(title: str) -> None:
     """
-    Affiche un séparateur lisible pour le debug.
+    Écrit un séparateur lisible dans les logs de debug.
     """
-    print("\n" + "=" * 90)
-    print(f"[FEATURE_BUILDER] {title}")
-    print("=" * 90)
+    logger.debug("=" * 90)
+    logger.debug("[FEATURE_BUILDER] %s", title)
+    logger.debug("=" * 90)
 
 
 def _debug_df(
@@ -161,35 +166,33 @@ def _debug_df(
     show_missing: bool = True,
 ) -> None:
     """
-    Affiche un résumé lisible d'un DataFrame pour le debug.
+    Écrit un résumé lisible d'un DataFrame dans les logs de debug.
     """
-    print(f"\n[DEBUG] {name}")
-    print(f"Shape               : {df.shape}")
-    print(f"Nb colonnes         : {len(df.columns)}")
-    print(f"Doublons index      : {df.index.duplicated().sum()}")
+    logger.debug("[DEBUG] %s", name)
+    logger.debug("Shape: %s", df.shape)
+    logger.debug("Nb colonnes: %s", len(df.columns))
+    logger.debug("Doublons index: %s", int(df.index.duplicated().sum()))
 
     if show_missing:
         total_na = int(df.isna().sum().sum())
-        print(f"Total valeurs NA    : {total_na}")
+        logger.debug("Total valeurs NA: %s", total_na)
 
         na_cols = df.isna().sum()
         na_cols = na_cols[na_cols > 0].sort_values(ascending=False)
 
         if len(na_cols) == 0:
-            print("Colonnes avec NA    : aucune")
+            logger.debug("Colonnes avec NA: aucune")
         else:
-            print(f"Colonnes avec NA    : {len(na_cols)}")
+            logger.debug("Colonnes avec NA: %s", len(na_cols))
             for col, nb in na_cols.head(10).items():
                 pct = (nb / len(df) * 100) if len(df) > 0 else 0
-                print(f"  - {col}: {nb} ({pct:.2f} %)")
+                logger.debug("  - %s: %s (%.2f %%)", col, int(nb), pct)
 
     if show_columns:
-        print("Colonnes :")
-        print(list(df.columns))
+        logger.debug("Colonnes: %s", list(df.columns))
 
     if preview_rows > 0 and len(df) > 0:
-        print("Aperçu :")
-        print(df.head(preview_rows).to_string())
+        logger.debug("Aperçu:\n%s", df.head(preview_rows).to_string())
 
 
 # =============================================================================
@@ -208,9 +211,33 @@ def load_raw_csv_sources(csv_path: Path | str | None = None) -> dict[str, pd.Dat
         raise FileNotFoundError(f"Fichier introuvable : {resolved_csv_path}")
 
     if not resolved_csv_path.is_file():
-        raise FileNotFoundError(f"Le chemin fourni n'est pas un fichier : {resolved_csv_path}")
+        raise FileNotFoundError(
+            f"Le chemin fourni n'est pas un fichier : {resolved_csv_path}"
+        )
+
+    logger.info(
+        "Loading raw CSV sources for feature builder",
+        extra={
+            "extra_data": {
+                "event": "feature_builder_load_raw_sources_start",
+                "csv_path": str(resolved_csv_path),
+            }
+        },
+    )
 
     application_df = pd.read_csv(resolved_csv_path)
+
+    logger.info(
+        "Raw CSV sources loaded successfully for feature builder",
+        extra={
+            "extra_data": {
+                "event": "feature_builder_load_raw_sources_success",
+                "csv_path": str(resolved_csv_path),
+                "rows": len(application_df),
+                "columns": len(application_df.columns),
+            }
+        },
+    )
 
     return {
         "application": application_df,
@@ -323,25 +350,30 @@ def _validate_feature_alignment(df: pd.DataFrame, *, debug: bool = False) -> Non
     missing = [col for col in MODEL_FEATURES if col not in df.columns]
     extra = [col for col in df.columns if col not in MODEL_FEATURES and col != "SK_ID_CURR"]
 
-    print(f"[FEATURE_BUILDER] Nb colonnes attendues        : {len(MODEL_FEATURES)}")
-    print(f"[FEATURE_BUILDER] Nb colonnes présentes         : {len(df.columns)}")
-    print(f"[FEATURE_BUILDER] Nb colonnes manquantes        : {len(missing)}")
-    print(f"[FEATURE_BUILDER] Nb colonnes supplémentaires   : {len(extra)}")
-
-    if missing:
-        print(f"[FEATURE_BUILDER] Exemples colonnes manquantes : {missing[:10]}")
-    if extra:
-        print(f"[FEATURE_BUILDER] Exemples colonnes en trop    : {extra[:10]}")
+    logger.info(
+        "Feature alignment checked",
+        extra={
+            "extra_data": {
+                "event": "feature_builder_alignment_checked",
+                "expected_columns": len(MODEL_FEATURES),
+                "present_columns": len(df.columns),
+                "missing_columns_count": len(missing),
+                "extra_columns_count": len(extra),
+                "missing_columns_preview": missing[:10],
+                "extra_columns_preview": extra[:10],
+            }
+        },
+    )
 
     if debug and missing:
-        print("[DEBUG] Liste complète des colonnes manquantes :")
+        logger.debug("Liste complète des colonnes manquantes :")
         for col in missing:
-            print(f"  - {col}")
+            logger.debug("  - %s", col)
 
     if debug and extra:
-        print("[DEBUG] Liste complète des colonnes en trop :")
+        logger.debug("Liste complète des colonnes en trop :")
         for col in extra:
-            print(f"  - {col}")
+            logger.debug("  - %s", col)
 
 
 def _align_model_features(
@@ -562,6 +594,18 @@ def build_features_from_loaded_data(
     """
     normalized_client_ids = _normalize_client_ids(client_ids)
 
+    logger.info(
+        "Feature building from loaded data started",
+        extra={
+            "extra_data": {
+                "event": "feature_builder_build_start",
+                "keep_id": keep_id,
+                "debug": debug,
+                "client_ids_count": len(normalized_client_ids) if normalized_client_ids is not None else None,
+            }
+        },
+    )
+
     if debug:
         _debug_title("CONSTRUCTION DES FEATURES DEPUIS LES SOURCES CHARGÉES")
 
@@ -605,6 +649,18 @@ def build_features_from_loaded_data(
         _debug_title("FEATURES FINALES")
         _debug_df(features, "features_finales", preview_rows=5)
 
+    logger.info(
+        "Feature building from loaded data completed",
+        extra={
+            "extra_data": {
+                "event": "feature_builder_build_success",
+                "keep_id": keep_id,
+                "rows": len(features),
+                "columns": len(features.columns),
+            }
+        },
+    )
+
     return features
 
 
@@ -630,23 +686,50 @@ def build_model_ready_features(
 
     normalized_client_ids = _normalize_client_ids(client_ids)
 
+    logger.info(
+        "Model-ready feature build requested",
+        extra={
+            "extra_data": {
+                "event": "feature_builder_model_ready_start",
+                "application_csv": str(APPLICATION_CSV),
+                "keep_id": keep_id,
+                "debug": debug,
+                "client_ids_count": len(normalized_client_ids) if normalized_client_ids is not None else None,
+            }
+        },
+    )
+
     if debug:
         _debug_title("DÉMARRAGE FEATURE BUILDER")
-        print(f"[DEBUG] source de données configurée : {APPLICATION_CSV}")
-        print(f"[DEBUG] keep_id : {keep_id}")
-        print(
-            "[DEBUG] client_ids fournis : "
-            f"{None if normalized_client_ids is None else len(normalized_client_ids)}"
+        logger.debug("source de données configurée : %s", APPLICATION_CSV)
+        logger.debug("keep_id : %s", keep_id)
+        logger.debug(
+            "client_ids fournis : %s",
+            None if normalized_client_ids is None else len(normalized_client_ids),
         )
 
     raw_sources = get_raw_data_cache()
 
-    return build_features_from_loaded_data(
+    result = build_features_from_loaded_data(
         raw_sources=raw_sources,
         client_ids=normalized_client_ids,
         debug=debug,
         keep_id=keep_id,
     )
+
+    logger.info(
+        "Model-ready feature build completed",
+        extra={
+            "extra_data": {
+                "event": "feature_builder_model_ready_success",
+                "rows": len(result),
+                "columns": len(result.columns),
+                "keep_id": keep_id,
+            }
+        },
+    )
+
+    return result
 
 
 def build_features_for_client(
@@ -659,6 +742,18 @@ def build_features_for_client(
     Construit les features prêtes pour le modèle pour un seul client.
     """
     client_id = int(client_id)
+
+    logger.info(
+        "Single-client feature build requested",
+        extra={
+            "extra_data": {
+                "event": "feature_builder_single_client_start",
+                "client_id": client_id,
+                "keep_id": keep_id,
+                "debug": debug,
+            }
+        },
+    )
 
     df = build_model_ready_features(
         client_ids=[client_id],
@@ -679,5 +774,17 @@ def build_features_for_client(
 
     if not keep_id:
         row.pop("SK_ID_CURR", None)
+
+    logger.info(
+        "Single-client feature build completed",
+        extra={
+            "extra_data": {
+                "event": "feature_builder_single_client_success",
+                "client_id": client_id,
+                "feature_count": len(row),
+                "keep_id": keep_id,
+            }
+        },
+    )
 
     return row

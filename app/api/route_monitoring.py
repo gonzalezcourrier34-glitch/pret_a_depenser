@@ -31,6 +31,7 @@ par `MonitoringService`.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -52,6 +53,9 @@ from app.core.schemas import (
     MonitoringSummaryResponse,
 )
 from app.services.monitoring_service import MonitoringService
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -153,22 +157,67 @@ def get_active_model(
     """
     Retourne la version active d'un modèle.
     """
+    logger.info(
+        "Active model requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_active_model_start",
+                "model_name": model_name,
+            }
+        },
+    )
+
     service = MonitoringService(db)
 
     try:
         entity = service.get_active_model(model_name=model_name)
 
         if entity is None:
+            logger.warning(
+                "No active model found",
+                extra={
+                    "extra_data": {
+                        "event": "monitoring_active_model_not_found",
+                        "model_name": model_name,
+                    }
+                },
+            )
+
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Aucun modèle actif trouvé.",
             )
 
+        logger.info(
+            "Active model returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_active_model_success",
+                    "model_name": entity.model_name,
+                    "model_version": entity.model_version,
+                    "stage": entity.stage,
+                    "is_active": entity.is_active,
+                }
+            },
+        )
+
         return _serialize_active_model(entity)
 
     except HTTPException:
         raise
+
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving active model",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_active_model_exception",
+                    "model_name": model_name,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération du modèle actif : {exc}",
@@ -190,6 +239,18 @@ def get_models(
     """
     Retourne les versions de modèles enregistrées.
     """
+    logger.info(
+        "Model registry requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_models_start",
+                "limit": limit,
+                "model_name": model_name,
+                "is_active": is_active,
+            }
+        },
+    )
+
     service = MonitoringService(db)
 
     try:
@@ -198,9 +259,40 @@ def get_models(
             model_name=model_name,
             is_active=is_active,
         )
+
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        count = payload.get("count", 0) if isinstance(payload, dict) else 0
+
+        logger.info(
+            "Model registry returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_models_success",
+                    "limit": limit,
+                    "model_name": model_name,
+                    "is_active": is_active,
+                    "returned_items": len(items) if isinstance(items, list) else 0,
+                    "count": count,
+                }
+            },
+        )
+
         return ModelRegistryListResponse(**payload)
 
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving model registry",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_models_exception",
+                    "limit": limit,
+                    "model_name": model_name,
+                    "is_active": is_active,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération du registre des modèles : {exc}",
@@ -220,6 +312,20 @@ def register_model_version(
     """
     Enregistre ou met à jour une version de modèle dans le registry.
     """
+    logger.info(
+        "Model version registration requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_register_model_start",
+                "model_name": payload.model_name,
+                "model_version": payload.model_version,
+                "stage": payload.stage,
+                "is_active": payload.is_active,
+                "run_id": payload.run_id,
+            }
+        },
+    )
+
     service = MonitoringService(db)
 
     try:
@@ -237,10 +343,39 @@ def register_model_version(
             is_active=payload.is_active,
         )
         db.commit()
+
+        logger.info(
+            "Model version registered successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_register_model_success",
+                    "model_name": result.get("model_name", payload.model_name),
+                    "model_version": result.get("model_version", payload.model_version),
+                    "stage": result.get("stage", payload.stage),
+                    "is_active": result.get("is_active", payload.is_active),
+                }
+            },
+        )
+
         return ModelRegistryRegisterResponse(**result)
 
     except Exception as exc:
         db.rollback()
+
+        logger.exception(
+            "Unexpected error while registering model version",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_register_model_exception",
+                    "model_name": payload.model_name,
+                    "model_version": payload.model_version,
+                    "stage": payload.stage,
+                    "is_active": payload.is_active,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de l'enregistrement du modèle : {exc}",
@@ -271,6 +406,23 @@ def get_drift_metrics(
     """
     Retourne les métriques de drift avec filtres optionnels.
     """
+    logger.info(
+        "Drift metrics requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_drift_start",
+                "limit": limit,
+                "model_name": model_name,
+                "model_version": model_version,
+                "feature_name": feature_name,
+                "metric_name": metric_name,
+                "drift_detected": drift_detected,
+                "window_start": window_start.isoformat() if window_start else None,
+                "window_end": window_end.isoformat() if window_end else None,
+            }
+        },
+    )
+
     _validate_window(window_start, window_end)
     service = MonitoringService(db)
 
@@ -285,9 +437,49 @@ def get_drift_metrics(
             window_start=window_start,
             window_end=window_end,
         )
+
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        count = payload.get("count", 0) if isinstance(payload, dict) else 0
+
+        logger.info(
+            "Drift metrics returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_drift_success",
+                    "limit": limit,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "feature_name": feature_name,
+                    "metric_name": metric_name,
+                    "drift_detected": drift_detected,
+                    "returned_items": len(items) if isinstance(items, list) else 0,
+                    "count": count,
+                }
+            },
+        )
+
         return GenericItemsResponse(**payload)
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving drift metrics",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_drift_exception",
+                    "limit": limit,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "feature_name": feature_name,
+                    "metric_name": metric_name,
+                    "drift_detected": drift_detected,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération des métriques de drift : {exc}",
@@ -312,6 +504,21 @@ def get_evaluation_metrics(
     """
     Retourne les métriques d'évaluation avec filtres optionnels.
     """
+    logger.info(
+        "Evaluation metrics requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_evaluation_start",
+                "limit": limit,
+                "model_name": model_name,
+                "model_version": model_version,
+                "dataset_name": dataset_name,
+                "window_start": window_start.isoformat() if window_start else None,
+                "window_end": window_end.isoformat() if window_end else None,
+            }
+        },
+    )
+
     _validate_window(window_start, window_end)
     service = MonitoringService(db)
 
@@ -324,9 +531,45 @@ def get_evaluation_metrics(
             window_start=window_start,
             window_end=window_end,
         )
+
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        count = payload.get("count", 0) if isinstance(payload, dict) else 0
+
+        logger.info(
+            "Evaluation metrics returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_evaluation_success",
+                    "limit": limit,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "dataset_name": dataset_name,
+                    "returned_items": len(items) if isinstance(items, list) else 0,
+                    "count": count,
+                }
+            },
+        )
+
         return GenericItemsResponse(**payload)
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving evaluation metrics",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_evaluation_exception",
+                    "limit": limit,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "dataset_name": dataset_name,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération des métriques d'évaluation : {exc}",
@@ -354,6 +597,24 @@ def get_feature_store(
     """
     Retourne les snapshots de features stockés pour le monitoring.
     """
+    logger.info(
+        "Feature store requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_feature_store_start",
+                "limit": limit,
+                "request_id": request_id,
+                "client_id": client_id,
+                "feature_name": feature_name,
+                "model_name": model_name,
+                "model_version": model_version,
+                "source_table": source_table,
+                "window_start": window_start.isoformat() if window_start else None,
+                "window_end": window_end.isoformat() if window_end else None,
+            }
+        },
+    )
+
     _validate_window(window_start, window_end)
     service = MonitoringService(db)
 
@@ -369,9 +630,51 @@ def get_feature_store(
             window_start=window_start,
             window_end=window_end,
         )
+
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        count = payload.get("count", 0) if isinstance(payload, dict) else 0
+
+        logger.info(
+            "Feature store returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_feature_store_success",
+                    "limit": limit,
+                    "request_id": request_id,
+                    "client_id": client_id,
+                    "feature_name": feature_name,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "source_table": source_table,
+                    "returned_items": len(items) if isinstance(items, list) else 0,
+                    "count": count,
+                }
+            },
+        )
+
         return GenericItemsResponse(**payload)
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving feature store",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_feature_store_exception",
+                    "limit": limit,
+                    "request_id": request_id,
+                    "client_id": client_id,
+                    "feature_name": feature_name,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "source_table": source_table,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération du feature store : {exc}",
@@ -401,6 +704,22 @@ def get_recent_alerts(
     """
     Retourne les alertes de monitoring récentes avec filtres optionnels.
     """
+    logger.info(
+        "Alerts requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_alerts_start",
+                "limit": limit,
+                "status": alert_status,
+                "severity": severity,
+                "alert_type": alert_type,
+                "model_name": model_name,
+                "model_version": model_version,
+                "feature_name": feature_name,
+            }
+        },
+    )
+
     service = MonitoringService(db)
 
     try:
@@ -416,12 +735,46 @@ def get_recent_alerts(
 
         items = [_serialize_alert(alert) for alert in alerts]
 
+        logger.info(
+            "Alerts returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_alerts_success",
+                    "limit": limit,
+                    "status": alert_status,
+                    "severity": severity,
+                    "alert_type": alert_type,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "feature_name": feature_name,
+                    "returned_items": len(items),
+                }
+            },
+        )
+
         return AlertListResponse(
             count=len(items),
             items=items,
         )
 
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving alerts",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_alerts_exception",
+                    "limit": limit,
+                    "status": alert_status,
+                    "severity": severity,
+                    "alert_type": alert_type,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "feature_name": feature_name,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération des alertes : {exc}",
@@ -441,12 +794,32 @@ def acknowledge_alert(
     """
     Marque une alerte comme reconnue.
     """
+    logger.info(
+        "Alert acknowledge requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_alert_ack_start",
+                "alert_id": alert_id,
+            }
+        },
+    )
+
     service = MonitoringService(db)
 
     try:
         alert = service.acknowledge_alert(alert_id)
 
         if alert is None:
+            logger.warning(
+                "Alert to acknowledge not found",
+                extra={
+                    "extra_data": {
+                        "event": "monitoring_alert_ack_not_found",
+                        "alert_id": alert_id,
+                    }
+                },
+            )
+
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Alerte introuvable.",
@@ -454,6 +827,17 @@ def acknowledge_alert(
 
         db.commit()
         db.refresh(alert)
+
+        logger.info(
+            "Alert acknowledged successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_alert_ack_success",
+                    "alert_id": alert.id,
+                    "status": alert.status,
+                }
+            },
+        )
 
         return AlertActionResponse(
             id=alert.id,
@@ -465,8 +849,21 @@ def acknowledge_alert(
     except HTTPException:
         db.rollback()
         raise
+
     except Exception as exc:
         db.rollback()
+
+        logger.exception(
+            "Unexpected error while acknowledging alert",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_alert_ack_exception",
+                    "alert_id": alert_id,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la reconnaissance de l'alerte : {exc}",
@@ -486,12 +883,32 @@ def resolve_alert(
     """
     Marque une alerte comme résolue.
     """
+    logger.info(
+        "Alert resolve requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_alert_resolve_start",
+                "alert_id": alert_id,
+            }
+        },
+    )
+
     service = MonitoringService(db)
 
     try:
         alert = service.resolve_alert(alert_id)
 
         if alert is None:
+            logger.warning(
+                "Alert to resolve not found",
+                extra={
+                    "extra_data": {
+                        "event": "monitoring_alert_resolve_not_found",
+                        "alert_id": alert_id,
+                    }
+                },
+            )
+
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Alerte introuvable.",
@@ -499,6 +916,17 @@ def resolve_alert(
 
         db.commit()
         db.refresh(alert)
+
+        logger.info(
+            "Alert resolved successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_alert_resolve_success",
+                    "alert_id": alert.id,
+                    "status": alert.status,
+                }
+            },
+        )
 
         return AlertActionResponse(
             id=alert.id,
@@ -510,8 +938,21 @@ def resolve_alert(
     except HTTPException:
         db.rollback()
         raise
+
     except Exception as exc:
         db.rollback()
+
+        logger.exception(
+            "Unexpected error while resolving alert",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_alert_resolve_exception",
+                    "alert_id": alert_id,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la résolution de l'alerte : {exc}",
@@ -538,6 +979,19 @@ def get_monitoring_summary(
     """
     Retourne une synthèse du monitoring sur un modèle.
     """
+    logger.info(
+        "Monitoring summary requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_summary_start",
+                "model_name": model_name,
+                "model_version": model_version,
+                "window_start": window_start.isoformat() if window_start else None,
+                "window_end": window_end.isoformat() if window_end else None,
+            }
+        },
+    )
+
     _validate_window(window_start, window_end)
     service = MonitoringService(db)
 
@@ -548,9 +1002,36 @@ def get_monitoring_summary(
             window_start=window_start,
             window_end=window_end,
         )
+
+        logger.info(
+            "Monitoring summary returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_summary_success",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                }
+            },
+        )
+
         return MonitoringSummaryResponse(**payload)
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving monitoring summary",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_summary_exception",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors du calcul de la synthèse : {exc}",
@@ -573,6 +1054,19 @@ def get_monitoring_health(
     """
     Retourne un état simple et lisible du monitoring.
     """
+    logger.info(
+        "Monitoring health requested",
+        extra={
+            "extra_data": {
+                "event": "monitoring_health_start",
+                "model_name": model_name,
+                "model_version": model_version,
+                "window_start": window_start.isoformat() if window_start else None,
+                "window_end": window_end.isoformat() if window_end else None,
+            }
+        },
+    )
+
     _validate_window(window_start, window_end)
     service = MonitoringService(db)
 
@@ -583,9 +1077,36 @@ def get_monitoring_health(
             window_start=window_start,
             window_end=window_end,
         )
+
+        logger.info(
+            "Monitoring health returned successfully",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_health_success",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                }
+            },
+        )
+
         return MonitoringHealthResponse(**payload)
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
+        logger.exception(
+            "Unexpected error while retrieving monitoring health",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_health_exception",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "error": str(exc),
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors du calcul de l'état du monitoring : {exc}",

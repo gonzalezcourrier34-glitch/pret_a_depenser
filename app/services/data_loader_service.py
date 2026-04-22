@@ -21,6 +21,8 @@ Notes
 
 from __future__ import annotations
 
+import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,9 @@ import pandas as pd
 
 from app.core.config import APPLICATION_CSV
 from app.services.features_builder_service import build_features_from_loaded_data
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -72,6 +77,40 @@ def _resolve_application_csv(csv_path: Path | str | None = None) -> Path:
     return Path(csv_path) if csv_path is not None else Path(APPLICATION_CSV)
 
 
+def _resolve_monitoring_dir(monitoring_dir: Path | str | None = None) -> Path:
+    """
+    Résout le répertoire de monitoring.
+    """
+    return Path(monitoring_dir) if monitoring_dir is not None else Path("monitoring")
+
+
+def _load_parquet_file(file_path: Path, logical_name: str) -> pd.DataFrame:
+    """
+    Charge un fichier parquet et vérifie qu'il est exploitable.
+    """
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Fichier introuvable pour `{logical_name}` : {file_path}"
+        )
+
+    df = pd.read_parquet(file_path)
+    _validate_dataframe(df, logical_name)
+    return df
+
+
+def _load_json_file(file_path: Path, logical_name: str) -> Any:
+    """
+    Charge un fichier JSON.
+    """
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Fichier introuvable pour `{logical_name}` : {file_path}"
+        )
+
+    with file_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 # =============================================================================
 # Chargement des données brutes
 # =============================================================================
@@ -108,8 +147,30 @@ def load_all_csv(csv_path: Path | str | None = None) -> dict[str, pd.DataFrame]:
             f"Le chemin fourni n'est pas un fichier CSV : {resolved_csv_path}"
         )
 
+    logger.info(
+        "Loading source CSV into memory",
+        extra={
+            "extra_data": {
+                "event": "data_load_csv_start",
+                "csv_path": str(resolved_csv_path),
+            }
+        },
+    )
+
     df = pd.read_csv(resolved_csv_path)
     _validate_dataframe(df, "application_source")
+
+    logger.info(
+        "Source CSV loaded successfully",
+        extra={
+            "extra_data": {
+                "event": "data_load_csv_success",
+                "csv_path": str(resolved_csv_path),
+                "rows": len(df),
+                "columns": len(df.columns),
+            }
+        },
+    )
 
     return {"application": df}
 
@@ -121,21 +182,50 @@ def init_raw_data_cache(csv_path: Path | str | None = None) -> None:
     global RAW_DATA_CACHE
 
     if RAW_DATA_CACHE:
-        print("[DATA] RAW_DATA_CACHE déjà initialisé -> skip")
+        logger.info(
+            "RAW_DATA_CACHE already initialized, skipping",
+            extra={
+                "extra_data": {
+                    "event": "data_raw_cache_skip",
+                    "cached_sources": list(RAW_DATA_CACHE.keys()),
+                }
+            },
+        )
         return
 
     resolved_csv_path = _resolve_application_csv(csv_path)
 
-    print(f"[DATA] Chargement du CSV brut source en mémoire : {resolved_csv_path}")
+    logger.info(
+        "Initializing RAW_DATA_CACHE",
+        extra={
+            "extra_data": {
+                "event": "data_raw_cache_init_start",
+                "csv_path": str(resolved_csv_path),
+            }
+        },
+    )
+
     RAW_DATA_CACHE = load_all_csv(resolved_csv_path)
 
     if not RAW_DATA_CACHE:
         raise RuntimeError("Aucune source brute n'a été chargée.")
 
-    print("[DATA] CSV brut chargé :")
-    for name, df in RAW_DATA_CACHE.items():
-        shape = df.shape if isinstance(df, pd.DataFrame) else ("?", "?")
-        print(f"   - {name:<25} shape={shape}")
+    cache_shapes = {
+        name: list(df.shape)
+        for name, df in RAW_DATA_CACHE.items()
+        if isinstance(df, pd.DataFrame)
+    }
+
+    logger.info(
+        "RAW_DATA_CACHE initialized successfully",
+        extra={
+            "extra_data": {
+                "event": "data_raw_cache_init_success",
+                "sources": list(RAW_DATA_CACHE.keys()),
+                "shapes": cache_shapes,
+            }
+        },
+    )
 
 
 def get_raw_data_cache() -> dict[str, pd.DataFrame]:
@@ -173,12 +263,31 @@ def init_features_ready_cache(
     global FEATURES_READY_CACHE
 
     if FEATURES_READY_CACHE is not None:
-        print("[DATA] FEATURES_READY_CACHE déjà initialisé -> skip")
+        logger.info(
+            "FEATURES_READY_CACHE already initialized, skipping",
+            extra={
+                "extra_data": {
+                    "event": "data_features_cache_skip",
+                    "shape": list(FEATURES_READY_CACHE.shape),
+                }
+            },
+        )
         return
 
     raw_sources = get_raw_data_cache()
 
-    print("[DATA] Construction du DataFrame enrichi...")
+    logger.info(
+        "Building enriched features dataframe",
+        extra={
+            "extra_data": {
+                "event": "data_features_cache_build_start",
+                "keep_id": keep_id,
+                "debug": debug,
+                "raw_sources": list(raw_sources.keys()),
+            }
+        },
+    )
+
     FEATURES_READY_CACHE = build_features_from_loaded_data(
         raw_sources=raw_sources,
         client_ids=None,
@@ -188,10 +297,19 @@ def init_features_ready_cache(
 
     _validate_dataframe(FEATURES_READY_CACHE, "FEATURES_READY_CACHE")
 
-    print(f"[DATA] Features prêtes OK (shape={FEATURES_READY_CACHE.shape})")
-
     if keep_id:
         _ensure_sk_id_curr(FEATURES_READY_CACHE)
+
+    logger.info(
+        "FEATURES_READY_CACHE initialized successfully",
+        extra={
+            "extra_data": {
+                "event": "data_features_cache_build_success",
+                "shape": list(FEATURES_READY_CACHE.shape),
+                "keep_id": keep_id,
+            }
+        },
+    )
 
 
 def get_features_ready_cache() -> pd.DataFrame:
@@ -234,6 +352,18 @@ def get_features_for_client_from_cache(
     if not keep_id and "SK_ID_CURR" in client_df.columns:
         client_df.drop(columns=["SK_ID_CURR"], inplace=True)
 
+    logger.info(
+        "Single client features retrieved from cache",
+        extra={
+            "extra_data": {
+                "event": "data_get_client_features_success",
+                "client_id": client_id,
+                "keep_id": keep_id,
+                "shape": list(client_df.shape),
+            }
+        },
+    )
+
     return client_df
 
 
@@ -269,6 +399,20 @@ def get_features_for_clients_from_cache(
     if not keep_id and "SK_ID_CURR" in subset.columns:
         subset.drop(columns=["SK_ID_CURR"], inplace=True)
 
+    logger.info(
+        "Multiple client features retrieved from cache",
+        extra={
+            "extra_data": {
+                "event": "data_get_clients_features_success",
+                "requested_client_ids": ids,
+                "missing_client_ids": missing_ids,
+                "keep_id": keep_id,
+                "strict": strict,
+                "shape": list(subset.shape),
+            }
+        },
+    )
+
     return subset
 
 
@@ -286,12 +430,29 @@ def init_full_data_cache(
     """
     resolved_csv_path = _resolve_application_csv(csv_path)
 
-    print(f"[DATA] Initialisation complète du cache depuis : {resolved_csv_path}")
+    logger.info(
+        "Full data cache initialization started",
+        extra={
+            "extra_data": {
+                "event": "data_full_cache_init_start",
+                "csv_path": str(resolved_csv_path),
+                "debug": debug,
+            }
+        },
+    )
 
     init_raw_data_cache(resolved_csv_path)
     init_features_ready_cache(keep_id=True, debug=debug)
 
-    print("[DATA] Initialisation complète terminée.")
+    logger.info(
+        "Full data cache initialization completed",
+        extra={
+            "extra_data": {
+                "event": "data_full_cache_init_success",
+                "csv_path": str(resolved_csv_path),
+            }
+        },
+    )
 
 
 def reset_data_cache() -> None:
@@ -303,51 +464,19 @@ def reset_data_cache() -> None:
     RAW_DATA_CACHE = {}
     FEATURES_READY_CACHE = None
 
-    print("[DATA] Cache reset effectué.")
+    logger.info(
+        "Application data caches reset",
+        extra={
+            "extra_data": {
+                "event": "data_cache_reset",
+            }
+        },
+    )
 
 
 # =============================================================================
 # Monitoring Evidently - références parquet / json
 # =============================================================================
-
-def _resolve_monitoring_dir(monitoring_dir: Path | str | None = None) -> Path:
-    """
-    Résout le répertoire de monitoring.
-    """
-    if monitoring_dir is not None:
-        return Path(monitoring_dir)
-
-    return Path("monitoring")
-
-
-def _load_parquet_file(file_path: Path, logical_name: str) -> pd.DataFrame:
-    """
-    Charge un fichier parquet et vérifie qu'il est exploitable.
-    """
-    if not file_path.exists():
-        raise FileNotFoundError(
-            f"Fichier introuvable pour `{logical_name}` : {file_path}"
-        )
-
-    df = pd.read_parquet(file_path)
-    _validate_dataframe(df, logical_name)
-    return df
-
-
-def _load_json_file(file_path: Path, logical_name: str) -> Any:
-    """
-    Charge un fichier JSON.
-    """
-    import json
-
-    if not file_path.exists():
-        raise FileNotFoundError(
-            f"Fichier introuvable pour `{logical_name}` : {file_path}"
-        )
-
-    with file_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
 
 def init_monitoring_reference_cache(
     monitoring_dir: Path | str | None = None,
@@ -358,7 +487,15 @@ def init_monitoring_reference_cache(
     global MONITORING_REFERENCE_CACHE
 
     if MONITORING_REFERENCE_CACHE:
-        print("[DATA][MONITORING] MONITORING_REFERENCE_CACHE déjà initialisé -> skip")
+        logger.info(
+            "MONITORING_REFERENCE_CACHE already initialized, skipping",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_reference_cache_skip",
+                    "keys": list(MONITORING_REFERENCE_CACHE.keys()),
+                }
+            },
+        )
         return
 
     base_dir = _resolve_monitoring_dir(monitoring_dir)
@@ -366,7 +503,15 @@ def init_monitoring_reference_cache(
     if not base_dir.exists():
         raise FileNotFoundError(f"Dossier monitoring introuvable : {base_dir}")
 
-    print(f"[DATA][MONITORING] Chargement des références monitoring depuis : {base_dir}")
+    logger.info(
+        "Monitoring reference cache initialization started",
+        extra={
+            "extra_data": {
+                "event": "monitoring_reference_cache_init_start",
+                "monitoring_dir": str(base_dir),
+            }
+        },
+    )
 
     cache: dict[str, Any] = {}
 
@@ -389,7 +534,6 @@ def init_monitoring_reference_cache(
     for key, path in optional_parquets.items():
         if path.exists():
             cache[key] = pd.read_parquet(path)
-            print(f"[DATA][MONITORING] {key:<35} loaded shape={cache[key].shape}")
 
     optional_jsons = {
         "input_feature_names": base_dir / "input_feature_names.json",
@@ -402,16 +546,26 @@ def init_monitoring_reference_cache(
     for key, path in optional_jsons.items():
         if path.exists():
             cache[key] = _load_json_file(path, key)
-            print(f"[DATA][MONITORING] {key:<35} loaded")
 
     MONITORING_REFERENCE_CACHE = cache
 
-    print("[DATA][MONITORING] Références monitoring chargées :")
+    summary: dict[str, Any] = {}
     for key, value in MONITORING_REFERENCE_CACHE.items():
         if isinstance(value, pd.DataFrame):
-            print(f"   - {key:<35} shape={value.shape}")
+            summary[key] = {"type": "DataFrame", "shape": list(value.shape)}
         else:
-            print(f"   - {key:<35} type={type(value).__name__}")
+            summary[key] = {"type": type(value).__name__}
+
+    logger.info(
+        "Monitoring reference cache initialized successfully",
+        extra={
+            "extra_data": {
+                "event": "monitoring_reference_cache_init_success",
+                "monitoring_dir": str(base_dir),
+                "summary": summary,
+            }
+        },
+    )
 
 
 def get_monitoring_reference_cache() -> dict[str, Any]:
@@ -495,4 +649,12 @@ def reset_monitoring_reference_cache() -> None:
     """
     global MONITORING_REFERENCE_CACHE
     MONITORING_REFERENCE_CACHE = {}
-    print("[DATA][MONITORING] Cache monitoring reset effectué.")
+
+    logger.info(
+        "Monitoring reference cache reset",
+        extra={
+            "extra_data": {
+                "event": "monitoring_reference_cache_reset",
+            }
+        },
+    )

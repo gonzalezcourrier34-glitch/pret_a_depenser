@@ -16,7 +16,7 @@ Notes
 -----
 - Ces schémas sont pensés pour être réutilisés dans plusieurs routes.
 - Ils reflètent les structures effectivement renvoyées
-  par les services métier.
+  par les services métier et les routes FastAPI.
 """
 
 from __future__ import annotations
@@ -63,7 +63,11 @@ class GenericItemsResponse(CountItemsResponse):
     """
     Réponse générique pour les endpoints qui renvoient :
     - count
-    - items (liste de dictionnaires)
+    - items (liste de dictionnaires souples)
+
+    Notes
+    -----
+    Utilisé pour les routes génériques de monitoring.
     """
 
     items: list[dict[str, Any]]
@@ -400,6 +404,11 @@ class MonitoringHealthResponse(StrictSchema):
 class PredictionHistoryItemResponse(StrictSchema):
     """
     Représentation d'une ligne d'historique de prédiction.
+
+    Notes
+    -----
+    Ce schéma est aligné sur ce que renvoient aujourd'hui
+    `history_service` et `route_history`.
     """
 
     id: int
@@ -408,12 +417,14 @@ class PredictionHistoryItemResponse(StrictSchema):
     model_name: str | None = None
     model_version: str | None = None
     prediction: int | None = None
+    prediction_label: str | None = None
     score: float | None = None
     threshold_used: float | None = None
     latency_ms: float | None = None
     prediction_timestamp: datetime | None = None
     status_code: int | None = None
     error_message: str | None = None
+    status: str | None = None
 
 
 class PredictionHistoryResponse(PaginatedItemsResponse):
@@ -422,6 +433,7 @@ class PredictionHistoryResponse(PaginatedItemsResponse):
     """
 
     items: list[PredictionHistoryItemResponse]
+    total: int | None = None
 
 
 class PredictionDetailResponse(BaseModel):
@@ -446,6 +458,7 @@ class PredictionDetailResponse(BaseModel):
     model_name: str | None = None
     model_version: str | None = None
     prediction: int | None = None
+    prediction_label: str | None = None
     score: float | None = None
     threshold_used: float | None = None
     latency_ms: float | None = None
@@ -454,6 +467,7 @@ class PredictionDetailResponse(BaseModel):
     prediction_timestamp: datetime | None = None
     status_code: int | None = None
     error_message: str | None = None
+    status: str | None = None
 
 
 class GroundTruthItemResponse(StrictSchema):
@@ -476,6 +490,7 @@ class GroundTruthHistoryResponse(PaginatedItemsResponse):
     """
 
     items: list[GroundTruthItemResponse]
+    total: int | None = None
 
 
 class PredictionFeatureSnapshotItemResponse(StrictSchema):

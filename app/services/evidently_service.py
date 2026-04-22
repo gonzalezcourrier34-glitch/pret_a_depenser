@@ -22,6 +22,7 @@ Notes
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
@@ -38,6 +39,9 @@ from app.services.data_loader_service import (
     init_monitoring_reference_cache,
 )
 from app.services.monitoring_service import MonitoringService
+
+
+logger = logging.getLogger(__name__)
 
 
 class EvidentlyService:
@@ -244,6 +248,9 @@ class EvidentlyService:
         if current_kind == "raw":
             raw_cache = get_raw_data_cache()
 
+            if "application" in raw_cache:
+                return raw_cache["application"].copy()
+
             if "application_test" in raw_cache:
                 return raw_cache["application_test"].copy()
 
@@ -252,7 +259,7 @@ class EvidentlyService:
 
             raise ValueError(
                 "Impossible de construire current_df brut : "
-                "ni `application_test` ni `app` dans RAW_DATA_CACHE."
+                "aucune source brute compatible trouvée dans RAW_DATA_CACHE."
             )
 
         return get_features_ready_cache().copy()
@@ -327,10 +334,36 @@ class EvidentlyService:
             feature_names=feature_names,
         )
 
+        logger.info(
+            "Starting Evidently data drift report",
+            extra={
+                "extra_data": {
+                    "event": "evidently_report_start",
+                    "reference_rows": len(ref),
+                    "current_rows": len(cur),
+                    "analyzed_columns_count": len(used_columns),
+                    "save_html_path": save_html_path,
+                }
+            },
+        )
+
         try:
             from evidently import Report
             from evidently.presets import DataDriftPreset
         except Exception as exc:
+            logger.exception(
+                "Failed to import Evidently",
+                extra={
+                    "extra_data": {
+                        "event": "evidently_import_exception",
+                        "reference_rows": len(ref),
+                        "current_rows": len(cur),
+                        "analyzed_columns_count": len(used_columns),
+                        "error": str(exc),
+                    }
+                },
+            )
+
             return {
                 "success": False,
                 "message": f"Impossible d'importer Evidently : {exc}",
@@ -351,6 +384,19 @@ class EvidentlyService:
                 save_html_path=save_html_path,
             )
 
+            logger.info(
+                "Evidently data drift report generated successfully",
+                extra={
+                    "extra_data": {
+                        "event": "evidently_report_success",
+                        "reference_rows": len(ref),
+                        "current_rows": len(cur),
+                        "analyzed_columns_count": len(used_columns),
+                        "html_report_path": html_report_path,
+                    }
+                },
+            )
+
             return {
                 "success": True,
                 "message": "Rapport Evidently généré avec succès.",
@@ -362,6 +408,20 @@ class EvidentlyService:
             }
 
         except Exception as exc:
+            logger.exception(
+                "Unexpected error during Evidently report execution",
+                extra={
+                    "extra_data": {
+                        "event": "evidently_report_exception",
+                        "reference_rows": len(ref),
+                        "current_rows": len(cur),
+                        "analyzed_columns_count": len(used_columns),
+                        "save_html_path": save_html_path,
+                        "error": str(exc),
+                    }
+                },
+            )
+
             return {
                 "success": False,
                 "message": f"Erreur pendant l'exécution d'Evidently : {exc}",
@@ -422,12 +482,26 @@ class EvidentlyService:
         if number_of_drifted_columns is not None and number_of_drifted_columns > 0:
             drift_detected = True
 
-        return {
+        summary = {
             "drift_detected": drift_detected,
             "number_of_drifted_columns": number_of_drifted_columns or 0,
             "share_of_drifted_columns": share_of_drifted_columns or 0.0,
             "raw_summary": block,
         }
+
+        logger.info(
+            "Extracted dataset drift summary",
+            extra={
+                "extra_data": {
+                    "event": "evidently_extract_dataset_summary_success",
+                    "drift_detected": summary["drift_detected"],
+                    "number_of_drifted_columns": summary["number_of_drifted_columns"],
+                    "share_of_drifted_columns": summary["share_of_drifted_columns"],
+                }
+            },
+        )
+
+        return summary
 
     def extract_drift_metrics_from_report(
         self,
@@ -465,6 +539,18 @@ class EvidentlyService:
             }
         ]
 
+        logger.info(
+            "Extracted normalized drift metrics from Evidently report",
+            extra={
+                "extra_data": {
+                    "event": "evidently_extract_metrics_success",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "logged_metrics": len(rows),
+                }
+            },
+        )
+
         return rows
 
     # =========================================================================
@@ -486,6 +572,21 @@ class EvidentlyService:
         """
         resolved_model_version = model_version or "unknown"
 
+        logger.info(
+            "Starting end-to-end Evidently drift analysis",
+            extra={
+                "extra_data": {
+                    "event": "evidently_analysis_start",
+                    "model_name": model_name,
+                    "model_version": resolved_model_version,
+                    "reference_kind": reference_kind,
+                    "current_kind": current_kind,
+                    "monitoring_dir": monitoring_dir,
+                    "save_html_path": save_html_path,
+                }
+            },
+        )
+
         if monitoring_dir:
             init_monitoring_reference_cache(Path(monitoring_dir))
         else:
@@ -501,6 +602,22 @@ class EvidentlyService:
             reference_kind=reference_kind,
         )
 
+        logger.info(
+            "Reference and current datasets loaded for Evidently analysis",
+            extra={
+                "extra_data": {
+                    "event": "evidently_analysis_data_loaded",
+                    "model_name": model_name,
+                    "model_version": resolved_model_version,
+                    "reference_kind": reference_kind,
+                    "current_kind": current_kind,
+                    "reference_rows": len(reference_df),
+                    "current_rows": len(current_df),
+                    "feature_names_count": len(feature_names) if feature_names else 0,
+                }
+            },
+        )
+
         result = self.run_data_drift_report(
             reference_df=reference_df,
             current_df=current_df,
@@ -509,11 +626,23 @@ class EvidentlyService:
         )
 
         if not bool(result.get("success", False)):
+            logger.warning(
+                "Evidently drift analysis finished without success",
+                extra={
+                    "extra_data": {
+                        "event": "evidently_analysis_failed_result",
+                        "model_name": model_name,
+                        "model_version": resolved_model_version,
+                        "reference_kind": reference_kind,
+                        "current_kind": current_kind,
+                        "message": result.get("message"),
+                    }
+                },
+            )
+
             return self._build_response_payload(
                 success=False,
-                message=str(
-                    result.get("message", "Échec de l'analyse Evidently.")
-                ),
+                message=str(result.get("message", "Échec de l'analyse Evidently.")),
                 model_name=model_name,
                 model_version=resolved_model_version,
                 reference_kind=reference_kind,
@@ -527,7 +656,8 @@ class EvidentlyService:
                 reference_rows=self._coerce_int(result.get("reference_rows"), 0),
                 current_rows=self._coerce_int(result.get("current_rows"), 0),
                 analyzed_columns=[
-                    str(col) for col in result.get("analyzed_columns", [])
+                    str(col)
+                    for col in result.get("analyzed_columns", [])
                     if isinstance(col, (str, int, float))
                 ],
                 report=(
@@ -571,6 +701,19 @@ class EvidentlyService:
                 current_window_end=row.get("current_window_end"),
             )
 
+        logger.info(
+            "Evidently drift metrics persisted successfully",
+            extra={
+                "extra_data": {
+                    "event": "evidently_analysis_persist_success",
+                    "model_name": model_name,
+                    "model_version": resolved_model_version,
+                    "logged_metrics": len(drift_rows),
+                    "html_report_path": result.get("html_report_path"),
+                }
+            },
+        )
+
         return self._build_response_payload(
             success=True,
             message="Analyse Evidently exécutée et persistée avec succès.",
@@ -587,13 +730,13 @@ class EvidentlyService:
             reference_rows=self._coerce_int(result.get("reference_rows"), 0),
             current_rows=self._coerce_int(result.get("current_rows"), 0),
             analyzed_columns=[
-                str(col) for col in result.get("analyzed_columns", [])
+                str(col)
+                for col in result.get("analyzed_columns", [])
                 if isinstance(col, (str, int, float))
             ],
             report=report,
         )
-    
-    
+
     def run_and_persist_data_drift_from_dataframes(
         self,
         *,
@@ -611,36 +754,23 @@ class EvidentlyService:
         """
         Exécute une analyse de drift Evidently à partir de deux DataFrames déjà
         construits, puis persiste les métriques dans la base.
-
-        Parameters
-        ----------
-        model_name : str
-            Nom du modèle surveillé.
-        model_version : str | None
-            Version du modèle surveillé.
-        reference_df : pd.DataFrame
-            Dataset de référence.
-        current_df : pd.DataFrame
-            Dataset courant à comparer.
-        feature_names : list[str] | None, default=None
-            Liste optionnelle des colonnes à conserver pour l'analyse.
-        save_html_path : str | None, default=None
-            Chemin optionnel de sauvegarde du rapport HTML.
-        reference_window_start : object, default=None
-            Début de la fenêtre de référence.
-        reference_window_end : object, default=None
-            Fin de la fenêtre de référence.
-        current_window_start : object, default=None
-            Début de la fenêtre courante.
-        current_window_end : object, default=None
-            Fin de la fenêtre courante.
-
-        Returns
-        -------
-        dict[str, object]
-            Résultat complet de l'analyse et de la persistance.
         """
         resolved_model_version = model_version or "unknown"
+
+        logger.info(
+            "Starting Evidently drift analysis from provided dataframes",
+            extra={
+                "extra_data": {
+                    "event": "evidently_analysis_from_dataframes_start",
+                    "model_name": model_name,
+                    "model_version": resolved_model_version,
+                    "reference_rows": len(reference_df) if isinstance(reference_df, pd.DataFrame) else None,
+                    "current_rows": len(current_df) if isinstance(current_df, pd.DataFrame) else None,
+                    "feature_names_count": len(feature_names) if feature_names else 0,
+                    "save_html_path": save_html_path,
+                }
+            },
+        )
 
         result = self.run_data_drift_report(
             reference_df=reference_df,
@@ -650,6 +780,18 @@ class EvidentlyService:
         )
 
         if not bool(result.get("success", False)):
+            logger.warning(
+                "Evidently dataframe-based analysis finished without success",
+                extra={
+                    "extra_data": {
+                        "event": "evidently_analysis_from_dataframes_failed_result",
+                        "model_name": model_name,
+                        "model_version": resolved_model_version,
+                        "message": result.get("message"),
+                    }
+                },
+            )
+
             return {
                 "success": False,
                 "message": result.get("message", "Échec de l'analyse Evidently."),
@@ -700,6 +842,19 @@ class EvidentlyService:
                 current_window_start=row.get("current_window_start"),
                 current_window_end=row.get("current_window_end"),
             )
+
+        logger.info(
+            "Evidently dataframe-based drift metrics persisted successfully",
+            extra={
+                "extra_data": {
+                    "event": "evidently_analysis_from_dataframes_persist_success",
+                    "model_name": model_name,
+                    "model_version": resolved_model_version,
+                    "logged_metrics": len(drift_rows),
+                    "html_report_path": result.get("html_report_path"),
+                }
+            },
+        )
 
         return {
             "success": True,

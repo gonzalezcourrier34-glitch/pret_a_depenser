@@ -22,6 +22,7 @@ Notes
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -34,6 +35,9 @@ from app.model.model_SQLalchemy import (
     FeatureStoreMonitoring,
     ModelRegistry,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -212,18 +216,41 @@ def get_active_model_record(
     """
     Retourne le modèle actif le plus récent.
     """
+    logger.debug(
+        "CRUD monitoring get_active_model_record",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_get_active_model_start",
+                "model_name": model_name,
+            }
+        },
+    )
+
     query = db.query(ModelRegistry).filter(ModelRegistry.is_active.is_(True))
 
     if model_name is not None:
         query = query.filter(ModelRegistry.model_name == model_name)
 
-    return (
+    entity = (
         query.order_by(
             ModelRegistry.deployed_at.desc(),
             ModelRegistry.created_at.desc(),
         )
         .first()
     )
+
+    logger.debug(
+        "CRUD monitoring get_active_model_record done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_get_active_model_success",
+                "model_name": model_name,
+                "found": entity is not None,
+            }
+        },
+    )
+
+    return entity
 
 
 def get_model_record_by_name_version(
@@ -235,7 +262,7 @@ def get_model_record_by_name_version(
     """
     Retourne une version précise du modèle si elle existe.
     """
-    return (
+    entity = (
         db.query(ModelRegistry)
         .filter(
             ModelRegistry.model_name == model_name,
@@ -243,6 +270,20 @@ def get_model_record_by_name_version(
         )
         .first()
     )
+
+    logger.debug(
+        "CRUD monitoring get_model_record_by_name_version done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_get_model_by_name_version_success",
+                "model_name": model_name,
+                "model_version": model_version,
+                "found": entity is not None,
+            }
+        },
+    )
+
+    return entity
 
 
 def list_model_records(
@@ -263,7 +304,7 @@ def list_model_records(
     if is_active is not None:
         query = query.filter(ModelRegistry.is_active.is_(is_active))
 
-    return (
+    rows = (
         query.order_by(
             ModelRegistry.created_at.desc(),
             ModelRegistry.deployed_at.desc(),
@@ -271,6 +312,21 @@ def list_model_records(
         .limit(limit)
         .all()
     )
+
+    logger.debug(
+        "CRUD monitoring list_model_records done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_list_models_success",
+                "limit": limit,
+                "model_name": model_name,
+                "is_active": is_active,
+                "count": len(rows),
+            }
+        },
+    )
+
+    return rows
 
 
 def create_model_record(
@@ -306,6 +362,20 @@ def create_model_record(
     )
     db.add(entity)
     db.flush()
+
+    logger.debug(
+        "CRUD monitoring create_model_record done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_create_model_success",
+                "id": entity.id,
+                "model_name": entity.model_name,
+                "model_version": entity.model_version,
+                "is_active": entity.is_active,
+            }
+        },
+    )
+
     return entity
 
 
@@ -336,6 +406,20 @@ def update_model_record(
     entity.deployed_at = deployed_at
     entity.is_active = is_active
     db.flush()
+
+    logger.debug(
+        "CRUD monitoring update_model_record done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_update_model_success",
+                "id": entity.id,
+                "model_name": entity.model_name,
+                "model_version": entity.model_version,
+                "is_active": entity.is_active,
+            }
+        },
+    )
+
     return entity
 
 
@@ -358,6 +442,17 @@ def deactivate_other_model_versions(
         .update({"is_active": False}, synchronize_session=False)
     )
     db.flush()
+
+    logger.debug(
+        "CRUD monitoring deactivate_other_model_versions done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_deactivate_other_models_success",
+                "model_name": model_name,
+                "keep_model_id": keep_model_id,
+            }
+        },
+    )
 
 
 # =============================================================================
@@ -401,6 +496,22 @@ def create_drift_metric_record(
     )
     db.add(entity)
     db.flush()
+
+    logger.debug(
+        "CRUD monitoring create_drift_metric_record done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_create_drift_success",
+                "id": entity.id,
+                "model_name": entity.model_name,
+                "model_version": entity.model_version,
+                "feature_name": entity.feature_name,
+                "metric_name": entity.metric_name,
+                "drift_detected": entity.drift_detected,
+            }
+        },
+    )
+
     return entity
 
 
@@ -430,7 +541,25 @@ def list_drift_metrics(
         window_end=window_end,
     )
 
-    return query.order_by(DriftMetric.computed_at.desc()).limit(limit).all()
+    rows = query.order_by(DriftMetric.computed_at.desc()).limit(limit).all()
+
+    logger.debug(
+        "CRUD monitoring list_drift_metrics done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_list_drift_success",
+                "limit": limit,
+                "model_name": model_name,
+                "model_version": model_version,
+                "feature_name": feature_name,
+                "metric_name": metric_name,
+                "drift_detected": drift_detected,
+                "count": len(rows),
+            }
+        },
+    )
+
+    return rows
 
 
 def count_drift_metrics(
@@ -454,7 +583,22 @@ def count_drift_metrics(
         window_end=window_end,
     )
 
-    return query.count()
+    count = query.count()
+
+    logger.debug(
+        "CRUD monitoring count_drift_metrics done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_count_drift_success",
+                "model_name": model_name,
+                "model_version": model_version,
+                "drift_detected": drift_detected,
+                "count": count,
+            }
+        },
+    )
+
+    return count
 
 
 def get_latest_drift_metric(
@@ -476,7 +620,21 @@ def get_latest_drift_metric(
         window_end=window_end,
     )
 
-    return query.order_by(DriftMetric.computed_at.desc()).first()
+    entity = query.order_by(DriftMetric.computed_at.desc()).first()
+
+    logger.debug(
+        "CRUD monitoring get_latest_drift_metric done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_get_latest_drift_success",
+                "model_name": model_name,
+                "model_version": model_version,
+                "found": entity is not None,
+            }
+        },
+    )
+
+    return entity
 
 
 # =============================================================================
@@ -530,6 +688,20 @@ def create_evaluation_metric_record(
     )
     db.add(entity)
     db.flush()
+
+    logger.debug(
+        "CRUD monitoring create_evaluation_metric_record done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_create_evaluation_success",
+                "id": entity.id,
+                "model_name": entity.model_name,
+                "model_version": entity.model_version,
+                "dataset_name": entity.dataset_name,
+            }
+        },
+    )
+
     return entity
 
 
@@ -555,7 +727,23 @@ def list_evaluation_metrics(
         window_end=window_end,
     )
 
-    return query.order_by(EvaluationMetric.computed_at.desc()).limit(limit).all()
+    rows = query.order_by(EvaluationMetric.computed_at.desc()).limit(limit).all()
+
+    logger.debug(
+        "CRUD monitoring list_evaluation_metrics done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_list_evaluation_success",
+                "limit": limit,
+                "model_name": model_name,
+                "model_version": model_version,
+                "dataset_name": dataset_name,
+                "count": len(rows),
+            }
+        },
+    )
+
+    return rows
 
 
 def get_latest_evaluation_metric(
@@ -579,7 +767,22 @@ def get_latest_evaluation_metric(
         window_end=window_end,
     )
 
-    return query.order_by(EvaluationMetric.computed_at.desc()).first()
+    entity = query.order_by(EvaluationMetric.computed_at.desc()).first()
+
+    logger.debug(
+        "CRUD monitoring get_latest_evaluation_metric done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_get_latest_evaluation_success",
+                "model_name": model_name,
+                "model_version": model_version,
+                "dataset_name": dataset_name,
+                "found": entity is not None,
+            }
+        },
+    )
+
+    return entity
 
 
 # =============================================================================
@@ -615,6 +818,20 @@ def create_feature_store_record(
     )
     db.add(entity)
     db.flush()
+
+    logger.debug(
+        "CRUD monitoring create_feature_store_record done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_create_feature_store_success",
+                "id": entity.id,
+                "request_id": entity.request_id,
+                "client_id": entity.client_id,
+                "feature_name": entity.feature_name,
+            }
+        },
+    )
+
     return entity
 
 
@@ -646,6 +863,17 @@ def create_feature_store_records(
         db.add_all(entities)
         db.flush()
 
+    logger.debug(
+        "CRUD monitoring create_feature_store_records done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_create_feature_store_batch_success",
+                "count": len(entities),
+                "timestamp": timestamp.isoformat() if timestamp else None,
+            }
+        },
+    )
+
 
 def list_feature_store_records(
     db: Session,
@@ -675,11 +903,30 @@ def list_feature_store_records(
         window_end=window_end,
     )
 
-    return (
+    rows = (
         query.order_by(FeatureStoreMonitoring.snapshot_timestamp.desc())
         .limit(limit)
         .all()
     )
+
+    logger.debug(
+        "CRUD monitoring list_feature_store_records done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_list_feature_store_success",
+                "limit": limit,
+                "request_id": request_id,
+                "client_id": client_id,
+                "feature_name": feature_name,
+                "model_name": model_name,
+                "model_version": model_version,
+                "source_table": source_table,
+                "count": len(rows),
+            }
+        },
+    )
+
+    return rows
 
 
 def count_feature_store_records(
@@ -709,7 +956,25 @@ def count_feature_store_records(
         window_end=window_end,
     )
 
-    return query.count()
+    count = query.count()
+
+    logger.debug(
+        "CRUD monitoring count_feature_store_records done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_count_feature_store_success",
+                "request_id": request_id,
+                "client_id": client_id,
+                "feature_name": feature_name,
+                "model_name": model_name,
+                "model_version": model_version,
+                "source_table": source_table,
+                "count": count,
+            }
+        },
+    )
+
+    return count
 
 
 def get_latest_feature_store_record(
@@ -739,7 +1004,25 @@ def get_latest_feature_store_record(
         window_end=window_end,
     )
 
-    return query.order_by(FeatureStoreMonitoring.snapshot_timestamp.desc()).first()
+    entity = query.order_by(FeatureStoreMonitoring.snapshot_timestamp.desc()).first()
+
+    logger.debug(
+        "CRUD monitoring get_latest_feature_store_record done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_get_latest_feature_store_success",
+                "request_id": request_id,
+                "client_id": client_id,
+                "feature_name": feature_name,
+                "model_name": model_name,
+                "model_version": model_version,
+                "source_table": source_table,
+                "found": entity is not None,
+            }
+        },
+    )
+
+    return entity
 
 
 # =============================================================================
@@ -777,6 +1060,20 @@ def create_alert_record(
     )
     db.add(entity)
     db.flush()
+
+    logger.debug(
+        "CRUD monitoring create_alert_record done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_create_alert_success",
+                "id": entity.id,
+                "alert_type": entity.alert_type,
+                "severity": entity.severity,
+                "status": entity.status,
+            }
+        },
+    )
+
     return entity
 
 
@@ -788,7 +1085,20 @@ def get_alert_by_id(
     """
     Retourne une alerte par identifiant.
     """
-    return db.query(Alert).filter(Alert.id == alert_id).first()
+    entity = db.query(Alert).filter(Alert.id == alert_id).first()
+
+    logger.debug(
+        "CRUD monitoring get_alert_by_id done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_get_alert_by_id_success",
+                "alert_id": alert_id,
+                "found": entity is not None,
+            }
+        },
+    )
+
+    return entity
 
 
 def list_alert_records(
@@ -819,7 +1129,26 @@ def list_alert_records(
         created_before=created_before,
     )
 
-    return query.order_by(Alert.created_at.desc()).limit(limit).all()
+    rows = query.order_by(Alert.created_at.desc()).limit(limit).all()
+
+    logger.debug(
+        "CRUD monitoring list_alert_records done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_list_alerts_success",
+                "limit": limit,
+                "status": status,
+                "severity": severity,
+                "alert_type": alert_type,
+                "model_name": model_name,
+                "model_version": model_version,
+                "feature_name": feature_name,
+                "count": len(rows),
+            }
+        },
+    )
+
+    return rows
 
 
 def count_alert_records(
@@ -849,7 +1178,25 @@ def count_alert_records(
         created_before=created_before,
     )
 
-    return query.count()
+    count = query.count()
+
+    logger.debug(
+        "CRUD monitoring count_alert_records done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_count_alerts_success",
+                "status": status,
+                "severity": severity,
+                "alert_type": alert_type,
+                "model_name": model_name,
+                "model_version": model_version,
+                "feature_name": feature_name,
+                "count": count,
+            }
+        },
+    )
+
+    return count
 
 
 def update_alert_status(
@@ -872,4 +1219,22 @@ def update_alert_status(
         alert.resolved_at = resolved_at
 
     db.flush()
+
+    logger.debug(
+        "CRUD monitoring update_alert_status done",
+        extra={
+            "extra_data": {
+                "event": "crud_monitoring_update_alert_success",
+                "alert_id": alert.id,
+                "status": alert.status,
+                "acknowledged_at": (
+                    acknowledged_at.isoformat() if acknowledged_at is not None else None
+                ),
+                "resolved_at": (
+                    resolved_at.isoformat() if resolved_at is not None else None
+                ),
+            }
+        },
+    )
+
     return alert

@@ -272,6 +272,7 @@ def render_monitoring_page(
     alerts_df: pd.DataFrame,
     feature_store_monitoring_df: pd.DataFrame,
     metric_safe_number,
+    run_evidently_analysis,
 ) -> None:
     """
     Affiche la page de monitoring du modèle.
@@ -363,7 +364,9 @@ def render_monitoring_page(
     # -------------------------------------------------------------------------
     detected_count_df = 0
     if not drift_metrics_df.empty and "drift_detected" in drift_metrics_df.columns:
-        detected_count_df = int(drift_metrics_df["drift_detected"].apply(_safe_bool).sum())
+        detected_count_df = int(
+            drift_metrics_df["drift_detected"].apply(_safe_bool).sum()
+        )
 
     open_alerts_df = 0
     if not alerts_df.empty and "status" in alerts_df.columns:
@@ -473,7 +476,11 @@ def render_monitoring_page(
             "Vue rapide sur la version active et la dernière évaluation connue.",
         )
 
-        row = latest_active_model_row if latest_active_model_row is not None else latest_registry_row
+        row = (
+            latest_active_model_row
+            if latest_active_model_row is not None
+            else latest_registry_row
+        )
 
         if row is not None:
             model_name = row.get("model_name", "N/A")
@@ -897,6 +904,100 @@ def render_monitoring_page(
                     drift_view[preferred_cols] if preferred_cols else drift_view,
                     width="stretch",
                 )
+
+        st.markdown("")
+        st.markdown("#### Exécution Evidently")
+
+        default_model_name = "credit_scoring_model"
+        default_model_version = None
+
+        if latest_active_model_row is not None:
+            model_name_value = latest_active_model_row.get("model_name")
+            if model_name_value is not None and pd.notna(model_name_value):
+                default_model_name = str(model_name_value)
+
+            model_version_value = latest_active_model_row.get("model_version")
+            if model_version_value is not None and pd.notna(model_version_value):
+                default_model_version = str(model_version_value)
+
+        run_col1, run_col2, run_col3 = st.columns([1, 1, 1])
+
+        with run_col1:
+            evidently_reference_kind = st.selectbox(
+                "Reference kind",
+                options=["transformed", "raw"],
+                index=0,
+                key="evidently_reference_kind",
+            )
+
+        with run_col2:
+            evidently_current_kind = st.selectbox(
+                "Current kind",
+                options=["transformed", "raw"],
+                index=0,
+                key="evidently_current_kind",
+            )
+
+        with run_col3:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            run_evidently_clicked = st.button(
+                "Lancer Evidently",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if run_evidently_clicked:
+            if evidently_reference_kind != evidently_current_kind:
+                st.error(
+                    "reference_kind et current_kind doivent être identiques."
+                )
+            else:
+                with st.spinner("Analyse Evidently en cours..."):
+                    ok, result = run_evidently_analysis(
+                        model_name=default_model_name,
+                        model_version=default_model_version,
+                        reference_kind=evidently_reference_kind,
+                        current_kind=evidently_current_kind,
+                        save_html_path="artifacts/evidently/report.html",
+                    )
+
+                if ok:
+                    if isinstance(result, dict) and result.get("success", False):
+                        st.success(
+                            result.get(
+                                "message",
+                                "Analyse Evidently exécutée avec succès.",
+                            )
+                        )
+
+                        html_report_path = result.get("html_report_path")
+                        if html_report_path:
+                            st.info(f"Rapport HTML sauvegardé : {html_report_path}")
+
+                        analyzed_columns = result.get("analyzed_columns")
+                        if isinstance(analyzed_columns, list):
+                            st.caption(f"Colonnes analysées : {len(analyzed_columns)}")
+
+                        with st.expander("Voir le résultat Evidently", expanded=False):
+                            st.json(result)
+
+                        st.cache_data.clear()
+                        st.rerun()
+
+                    else:
+                        detail = (
+                            result.get("message")
+                            if isinstance(result, dict)
+                            else result
+                        )
+                        st.error(f"Analyse Evidently non réussie : {detail}")
+                else:
+                    detail = (
+                        result.get("detail")
+                        if isinstance(result, dict)
+                        else result
+                    )
+                    st.error(f"Erreur API Evidently : {detail}")
 
         st.markdown("")
         st.markdown("#### Feature store monitoring")

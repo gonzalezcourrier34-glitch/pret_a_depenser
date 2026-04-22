@@ -23,6 +23,7 @@ Architecture actuelle
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -33,11 +34,13 @@ from sqlalchemy import text
 from app.api.route_evidently import router as evidently_router
 from app.api.route_history import router as history_router
 from app.api.route_monitoring import router as monitoring_router
-from app.api.route_predict import router as predict_router
+from app.api.route_prediction import router as predict_router
 from app.core.config import DEBUG
 from app.core.db import SessionLocal
+from app.core.logging_config import setup_logging
+from app.services.logging_service import LoggingMiddleware
 from app.services.data_loader_service import init_full_data_cache
-from app.services.model_loader_service import get_model, get_threshold
+from app.services.model_loading_service import get_model, get_threshold
 
 
 # =============================================================================
@@ -45,6 +48,14 @@ from app.services.model_loader_service import get_model, get_threshold
 # =============================================================================
 
 load_dotenv()
+
+
+# =============================================================================
+# Configuration du logging
+# =============================================================================
+
+setup_logging(write_file=True)
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -94,28 +105,105 @@ async def lifespan(app: FastAPI):
     - la disponibilité minimale de la base PostgreSQL
     - le chargement en mémoire des données CSV métier
     """
-    print("[APP] Démarrage de l'application...")
+    logger.info(
+        "Application startup initiated",
+        extra={
+            "extra_data": {
+                "event": "app_startup_begin",
+                "service": "credit_scoring_api",
+            }
+        },
+    )
 
-    get_model()
-    print("[APP] Modèle chargé.")
-
-    get_threshold()
-    print("[APP] Seuil chargé.")
-
-    db = SessionLocal()
     try:
-        db.execute(text("SELECT 1"))
-        print("[APP] Connexion PostgreSQL OK.")
+        get_model()
+        logger.info(
+            "Model loaded successfully",
+            extra={
+                "extra_data": {
+                    "event": "model_loaded",
+                }
+            },
+        )
+
+        get_threshold()
+        logger.info(
+            "Threshold loaded successfully",
+            extra={
+                "extra_data": {
+                    "event": "threshold_loaded",
+                }
+            },
+        )
+
+        db = SessionLocal()
+        try:
+            db.execute(text("SELECT 1"))
+            logger.info(
+                "PostgreSQL connection check succeeded",
+                extra={
+                    "extra_data": {
+                        "event": "database_check_ok",
+                    }
+                },
+            )
+        finally:
+            db.close()
+
+        logger.info(
+            "CSV cache initialization started",
+            extra={
+                "extra_data": {
+                    "event": "csv_cache_init_begin",
+                }
+            },
+        )
+
+        init_full_data_cache(debug=False)
+
+        logger.info(
+            "CSV cache initialized successfully",
+            extra={
+                "extra_data": {
+                    "event": "csv_cache_init_success",
+                }
+            },
+        )
+
+        logger.info(
+            "Application startup completed",
+            extra={
+                "extra_data": {
+                    "event": "app_startup_complete",
+                    "service": "credit_scoring_api",
+                }
+            },
+        )
+
+        yield
+
+    except Exception:
+        logger.exception(
+            "Application startup failed",
+            extra={
+                "extra_data": {
+                    "event": "app_startup_error",
+                    "service": "credit_scoring_api",
+                }
+            },
+        )
+        raise
+
     finally:
-        db.close()
-
-    print("[APP] Chargement du cache métier CSV...")
-    init_full_data_cache(debug=False)
-    print("[APP] Cache CSV initialisé.")
-
-    yield
-
-    print("[APP] Arrêt de l'application.")
+        logger.info(
+            "Application shutdown completed",
+            extra={
+                "extra_data": {
+                    "event": "app_shutdown",
+                    "service": "credit_scoring_api",
+                }
+            },
+        )
 
 
 # =============================================================================
@@ -133,6 +221,13 @@ app = FastAPI(
     lifespan=lifespan,
     openapi_tags=OPENAPI_TAGS,
 )
+
+
+# =============================================================================
+# Middlewares
+# =============================================================================
+
+app.add_middleware(LoggingMiddleware)
 
 
 # =============================================================================

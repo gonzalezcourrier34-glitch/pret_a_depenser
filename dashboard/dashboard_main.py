@@ -59,9 +59,9 @@ from dashboard_request import (
     get_prediction_features_snapshot,
     get_prediction_history,
     metric_safe_number,
+    run_evidently_analysis,
 )
 from dashboard_systeme import render_systeme_page
-
 
 # =============================================================================
 # Configuration Streamlit
@@ -215,6 +215,31 @@ def get_ground_truth_by_request_id_wrapper(
     return get_ground_truth_by_request_id(
         request_id,
         ground_truth_df=ground_truth_df,
+    )
+
+
+def run_evidently_analysis_wrapper(
+    *,
+    model_name: str,
+    model_version: str | None = None,
+    reference_kind: str = "transformed",
+    current_kind: str = "transformed",
+    monitoring_dir: str | None = None,
+    save_html_path: str | None = "artifacts/evidently/report.html",
+) -> tuple[bool, Any]:
+    """
+    Wrapper local pour lancer une analyse Evidently
+    avec la configuration du dashboard.
+    """
+    return run_evidently_analysis(
+        base_url=API_URL,
+        api_key=API_KEY,
+        model_name=model_name,
+        model_version=model_version,
+        reference_kind=reference_kind,
+        current_kind=current_kind,
+        monitoring_dir=monitoring_dir,
+        save_html_path=save_html_path,
     )
 
 
@@ -480,4 +505,5 @@ elif page == "Monitoring":
         alerts_df=alerts_df,
         feature_store_monitoring_df=feature_store_monitoring_df,
         metric_safe_number=metric_safe_number,
+        run_evidently_analysis=run_evidently_analysis_wrapper,
     )

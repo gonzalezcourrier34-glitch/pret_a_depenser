@@ -19,6 +19,7 @@ Notes
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -29,6 +30,9 @@ from app.model.model_SQLalchemy import (
     PredictionFeatureSnapshot,
     PredictionLog,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -112,6 +116,24 @@ def create_prediction_log(
     )
     db.add(entity)
     db.flush()
+
+    logger.debug(
+        "CRUD prediction create_prediction_log done",
+        extra={
+            "extra_data": {
+                "event": "crud_prediction_create_log_success",
+                "id": entity.id,
+                "request_id": entity.request_id,
+                "client_id": entity.client_id,
+                "model_name": entity.model_name,
+                "model_version": entity.model_version,
+                "prediction": entity.prediction,
+                "status_code": entity.status_code,
+                "has_error": entity.error_message is not None,
+            }
+        },
+    )
+
     return entity
 
 
@@ -123,11 +145,24 @@ def get_prediction_log_by_request_id(
     """
     Retourne un log de prédiction à partir du request_id.
     """
-    return (
+    entity = (
         db.query(PredictionLog)
         .filter(PredictionLog.request_id == request_id)
         .first()
     )
+
+    logger.debug(
+        "CRUD prediction get_prediction_log_by_request_id done",
+        extra={
+            "extra_data": {
+                "event": "crud_prediction_get_log_by_request_id_success",
+                "request_id": request_id,
+                "found": entity is not None,
+            }
+        },
+    )
+
+    return entity
 
 
 def list_prediction_logs(
@@ -154,11 +189,28 @@ def list_prediction_logs(
         window_end=window_end,
     )
 
-    return (
+    rows = (
         query.order_by(PredictionLog.prediction_timestamp.desc())
         .limit(limit)
         .all()
     )
+
+    logger.debug(
+        "CRUD prediction list_prediction_logs done",
+        extra={
+            "extra_data": {
+                "event": "crud_prediction_list_logs_success",
+                "limit": limit,
+                "client_id": client_id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "only_errors": only_errors,
+                "count": len(rows),
+            }
+        },
+    )
+
+    return rows
 
 
 def count_prediction_logs(
@@ -182,7 +234,23 @@ def count_prediction_logs(
         window_start=window_start,
         window_end=window_end,
     )
-    return query.count()
+
+    count = query.count()
+
+    logger.debug(
+        "CRUD prediction count_prediction_logs done",
+        extra={
+            "extra_data": {
+                "event": "crud_prediction_count_logs_success",
+                "client_id": client_id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "count": count,
+            }
+        },
+    )
+
+    return count
 
 
 def count_prediction_errors(
@@ -206,7 +274,23 @@ def count_prediction_errors(
         window_start=window_start,
         window_end=window_end,
     )
-    return query.count()
+
+    count = query.count()
+
+    logger.debug(
+        "CRUD prediction count_prediction_errors done",
+        extra={
+            "extra_data": {
+                "event": "crud_prediction_count_errors_success",
+                "client_id": client_id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "count": count,
+            }
+        },
+    )
+
+    return count
 
 
 def get_latest_prediction_log(
@@ -231,7 +315,22 @@ def get_latest_prediction_log(
         window_end=window_end,
     )
 
-    return query.order_by(PredictionLog.prediction_timestamp.desc()).first()
+    entity = query.order_by(PredictionLog.prediction_timestamp.desc()).first()
+
+    logger.debug(
+        "CRUD prediction get_latest_prediction_log done",
+        extra={
+            "extra_data": {
+                "event": "crud_prediction_get_latest_log_success",
+                "client_id": client_id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "found": entity is not None,
+            }
+        },
+    )
+
+    return entity
 
 
 def get_average_latency_ms(
@@ -259,12 +358,49 @@ def get_average_latency_ms(
     value = query.with_entities(func.avg(PredictionLog.latency_ms)).scalar()
 
     if value is None:
+        logger.debug(
+            "CRUD prediction get_average_latency_ms done with no value",
+            extra={
+                "extra_data": {
+                    "event": "crud_prediction_get_avg_latency_empty",
+                    "client_id": client_id,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                }
+            },
+        )
         return None
 
     try:
-        return float(value)
+        result = float(value)
     except Exception:
+        logger.debug(
+            "CRUD prediction get_average_latency_ms failed to cast value",
+            extra={
+                "extra_data": {
+                    "event": "crud_prediction_get_avg_latency_cast_error",
+                    "client_id": client_id,
+                    "model_name": model_name,
+                    "model_version": model_version,
+                }
+            },
+        )
         return None
+
+    logger.debug(
+        "CRUD prediction get_average_latency_ms done",
+        extra={
+            "extra_data": {
+                "event": "crud_prediction_get_avg_latency_success",
+                "client_id": client_id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "avg_latency_ms": result,
+            }
+        },
+    )
+
+    return result
 
 
 # =============================================================================
@@ -298,6 +434,17 @@ def create_feature_snapshots(
         db.add_all(entities)
         db.flush()
 
+    logger.debug(
+        "CRUD prediction create_feature_snapshots done",
+        extra={
+            "extra_data": {
+                "event": "crud_prediction_create_feature_snapshots_success",
+                "count": len(entities),
+                "timestamp": timestamp.isoformat() if timestamp else None,
+            }
+        },
+    )
+
 
 def list_feature_snapshots_by_request_id(
     db: Session,
@@ -307,9 +454,22 @@ def list_feature_snapshots_by_request_id(
     """
     Retourne les snapshots de features pour une requête donnée.
     """
-    return (
+    rows = (
         db.query(PredictionFeatureSnapshot)
         .filter(PredictionFeatureSnapshot.request_id == request_id)
         .order_by(PredictionFeatureSnapshot.feature_name.asc())
         .all()
     )
+
+    logger.debug(
+        "CRUD prediction list_feature_snapshots_by_request_id done",
+        extra={
+            "extra_data": {
+                "event": "crud_prediction_list_feature_snapshots_success",
+                "request_id": request_id,
+                "count": len(rows),
+            }
+        },
+    )
+
+    return rows

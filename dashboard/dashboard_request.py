@@ -63,7 +63,7 @@ import requests
 DEFAULT_TIMEOUT = 30
 DEFAULT_BATCH_TIMEOUT = 60
 DEFAULT_SIMULATION_TIMEOUT = 120
-
+DEFAULT_EVIDENTLY_TIMEOUT = 300
 
 def build_headers(api_key: str | None = None) -> dict[str, str]:
     """
@@ -1217,3 +1217,54 @@ def build_preview_map(
         "evaluation_metrics": evaluation_metrics_df.head(max_rows),
         "alerts": alerts_df.head(max_rows),
     }
+
+# =============================================================================
+# Endpoints Evidently
+# =============================================================================
+
+def run_evidently_analysis(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    model_version: str | None = None,
+    reference_kind: str = "transformed",
+    current_kind: str = "transformed",
+    monitoring_dir: str | None = None,
+    save_html_path: str | None = "artifacts/evidently/report.html",
+    timeout: int = DEFAULT_EVIDENTLY_TIMEOUT,
+) -> tuple[bool, Any]:
+    """
+    Lance une analyse Evidently via l'API FastAPI.
+
+    Notes
+    -----
+    Cette fonction appelle la route :
+    - POST /evidently/run
+
+    Les paramètres sont passés en query params pour rester cohérents
+    avec la signature actuelle de la route FastAPI.
+    """
+    params: dict[str, Any] = {
+        "model_name": model_name,
+        "reference_kind": reference_kind,
+        "current_kind": current_kind,
+    }
+
+    if model_version is not None:
+        params["model_version"] = model_version
+
+    if monitoring_dir is not None:
+        params["monitoring_dir"] = monitoring_dir
+
+    if save_html_path is not None:
+        params["save_html_path"] = save_html_path
+
+    return call_api(
+        "/evidently/run",
+        base_url=base_url,
+        api_key=api_key,
+        method="POST",
+        params=params,
+        timeout=timeout,
+    )
