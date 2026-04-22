@@ -125,7 +125,17 @@ def _safe_bool(value: Any) -> bool:
             return False
     except Exception:
         pass
-    return bool(value)
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "oui"}
+
+    try:
+        return bool(value)
+    except Exception:
+        return False
 
 
 def _build_resource_summary_card(
@@ -145,6 +155,24 @@ def _build_resource_summary_card(
         return "Aucune disponible", "#DC2626"
 
     return "Disponibilité partielle", "#D97706"
+
+
+def _normalize_available_tables(
+    available_tables: list[str],
+    preview_map: dict[str, pd.DataFrame],
+) -> list[str]:
+    """
+    Nettoie la liste des tables disponibles.
+
+    Si la liste fournie est vide, on se rabat sur les clés du preview_map.
+    """
+    if isinstance(available_tables, list) and available_tables:
+        return [str(x) for x in available_tables]
+
+    if isinstance(preview_map, dict) and preview_map:
+        return [str(x) for x in preview_map.keys()]
+
+    return []
 
 
 # =============================================================================
@@ -178,9 +206,14 @@ def render_systeme_page(
     health_data = _safe_dict(health_data)
     tables_status_df = _safe_dataframe(tables_status_df)
     selected_table_preview_map = (
-        selected_table_preview_map if isinstance(selected_table_preview_map, dict) else {}
+        selected_table_preview_map
+        if isinstance(selected_table_preview_map, dict)
+        else {}
     )
-    available_tables = available_tables if isinstance(available_tables, list) else []
+    available_tables = _normalize_available_tables(
+        available_tables=available_tables if isinstance(available_tables, list) else [],
+        preview_map=selected_table_preview_map,
+    )
 
     st.markdown("## Système et données")
     st.caption(
@@ -198,9 +231,7 @@ def render_systeme_page(
 
     if not tables_status_df.empty and "is_available" in tables_status_df.columns:
         available_count = int(
-            tables_status_df["is_available"]
-            .apply(_safe_bool)
-            .sum()
+            tables_status_df["is_available"].apply(_safe_bool).sum()
         )
 
     resources_label, resources_color = _build_resource_summary_card(
@@ -249,9 +280,6 @@ def render_systeme_page(
             "Diagnostic rapide de l’API et des ressources visibles par le dashboard.",
         )
 
-        # ---------------------------------------------------------------------
-        # Bloc statut global
-        # ---------------------------------------------------------------------
         left, right = st.columns([2, 1])
 
         with left:
@@ -297,9 +325,6 @@ def render_systeme_page(
                 st.cache_data.clear()
                 st.rerun()
 
-        # ---------------------------------------------------------------------
-        # Détail healthcheck
-        # ---------------------------------------------------------------------
         _render_section_title(
             "Réponse healthcheck",
             "Contenu brut renvoyé par l’API.",
@@ -310,9 +335,6 @@ def render_systeme_page(
         else:
             st.info("Aucune réponse healthcheck disponible.")
 
-        # ---------------------------------------------------------------------
-        # Ressources
-        # ---------------------------------------------------------------------
         _render_section_title(
             "Ressources du système",
             "Disponibilité logique des ressources exploitées par le dashboard.",
@@ -329,12 +351,8 @@ def render_systeme_page(
                 )
 
             preferred_cols = [
-                col for col in [
-                    "resource_name",
-                    "is_available",
-                    "row_count",
-                    "comment",
-                ]
+                col
+                for col in ["resource_name", "is_available", "row_count", "comment"]
                 if col in display_df.columns
             ]
 
@@ -402,7 +420,11 @@ def render_systeme_page(
                     if numeric_df.empty:
                         st.info("Aucune colonne numérique disponible pour les statistiques.")
                     else:
-                        st.dataframe(numeric_df.describe().transpose(), width="stretch")
+                        try:
+                            stats_df = numeric_df.describe().transpose()
+                            st.dataframe(stats_df, width="stretch")
+                        except Exception:
+                            st.info("Impossible de calculer les statistiques sur cet aperçu.")
 
                 st.dataframe(preview_df, width="stretch")
 

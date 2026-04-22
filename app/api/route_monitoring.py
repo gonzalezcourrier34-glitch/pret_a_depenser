@@ -32,14 +32,25 @@ par `MonitoringService`.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.security import verify_api_key
+from app.core.schemas import (
+    ActiveModelResponse,
+    AlertActionResponse,
+    AlertListResponse,
+    AlertResponse,
+    GenericItemsResponse,
+    ModelRegistryCreateRequest,
+    ModelRegistryListResponse,
+    ModelRegistryRegisterResponse,
+    MonitoringHealthResponse,
+    MonitoringSummaryResponse,
+)
 from app.services.monitoring_service import MonitoringService
 
 
@@ -51,99 +62,6 @@ router = APIRouter(
     prefix="/monitoring",
     tags=["Monitoring"],
 )
-
-
-# =============================================================================
-# Schémas
-# =============================================================================
-
-class ModelRegistryCreateRequest(BaseModel):
-    """
-    Payload d'enregistrement ou de mise à jour d'une version de modèle.
-    """
-
-    model_name: str = Field(..., description="Nom du modèle")
-    model_version: str = Field(..., description="Version du modèle")
-    stage: Literal["dev", "staging", "production", "archived"] = Field(
-        ...,
-        description="Stade du modèle",
-    )
-    run_id: str | None = Field(default=None, description="Identifiant de run MLflow")
-    source_path: str | None = Field(default=None, description="Chemin de l'artefact")
-    training_data_version: str | None = Field(
-        default=None,
-        description="Version des données d'entraînement",
-    )
-    feature_list: list[str] | None = Field(
-        default=None,
-        description="Liste des features attendues",
-    )
-    hyperparameters: dict[str, Any] | None = Field(
-        default=None,
-        description="Hyperparamètres du modèle",
-    )
-    metrics: dict[str, Any] | None = Field(
-        default=None,
-        description="Métriques du modèle",
-    )
-    deployed_at: datetime | None = Field(
-        default=None,
-        description="Date de déploiement",
-    )
-    is_active: bool = Field(
-        default=False,
-        description="Indique si cette version devient active",
-    )
-
-
-class AlertActionResponse(BaseModel):
-    """
-    Réponse standard pour les actions sur les alertes.
-    """
-
-    id: int
-    status: str
-    acknowledged_at: datetime | None = None
-    resolved_at: datetime | None = None
-
-
-class ActiveModelResponse(BaseModel):
-    """
-    Réponse décrivant le modèle actif.
-    """
-
-    model_name: str
-    model_version: str
-    stage: str
-    run_id: str | None = None
-    source_path: str | None = None
-    training_data_version: str | None = None
-    feature_list: list[str] | None = None
-    hyperparameters: dict[str, Any] | None = None
-    metrics: dict[str, Any] | None = None
-    deployed_at: datetime | None = None
-    is_active: bool
-    created_at: datetime
-
-
-class AlertResponse(BaseModel):
-    """
-    Représentation d'une alerte de monitoring.
-    """
-
-    id: int
-    alert_type: str
-    severity: str
-    model_name: str | None = None
-    model_version: str | None = None
-    feature_name: str | None = None
-    title: str
-    message: str
-    context: dict[str, Any] | None = None
-    status: str
-    created_at: datetime
-    acknowledged_at: datetime | None = None
-    resolved_at: datetime | None = None
 
 
 # =============================================================================
@@ -163,7 +81,11 @@ def _validate_window(
             detail="window_start et window_end doivent être fournis ensemble.",
         )
 
-    if window_start is not None and window_end is not None and window_end <= window_start:
+    if (
+        window_start is not None
+        and window_end is not None
+        and window_end <= window_start
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="window_end doit être strictement supérieur à window_start.",
@@ -255,6 +177,7 @@ def get_active_model(
 
 @router.get(
     "/models",
+    response_model=ModelRegistryListResponse,
     summary="Retourne le registre des modèles",
 )
 def get_models(
@@ -263,18 +186,19 @@ def get_models(
     is_active: bool | None = Query(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> ModelRegistryListResponse:
     """
     Retourne les versions de modèles enregistrées.
     """
     service = MonitoringService(db)
 
     try:
-        return service.get_models(
+        payload = service.get_models(
             limit=limit,
             model_name=model_name,
             is_active=is_active,
         )
+        return ModelRegistryListResponse(**payload)
 
     except Exception as exc:
         raise HTTPException(
@@ -285,13 +209,14 @@ def get_models(
 
 @router.post(
     "/models/register",
+    response_model=ModelRegistryRegisterResponse,
     summary="Enregistre ou met à jour une version de modèle",
 )
 def register_model_version(
     payload: ModelRegistryCreateRequest,
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> ModelRegistryRegisterResponse:
     """
     Enregistre ou met à jour une version de modèle dans le registry.
     """
@@ -312,7 +237,7 @@ def register_model_version(
             is_active=payload.is_active,
         )
         db.commit()
-        return result
+        return ModelRegistryRegisterResponse(**result)
 
     except Exception as exc:
         db.rollback()
@@ -328,6 +253,7 @@ def register_model_version(
 
 @router.get(
     "/drift",
+    response_model=GenericItemsResponse,
     summary="Retourne les métriques de drift",
 )
 def get_drift_metrics(
@@ -335,12 +261,13 @@ def get_drift_metrics(
     model_name: str | None = Query(default=None),
     model_version: str | None = Query(default=None),
     feature_name: str | None = Query(default=None),
+    metric_name: str | None = Query(default=None),
     drift_detected: bool | None = Query(default=None),
     window_start: datetime | None = Query(default=None),
     window_end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> GenericItemsResponse:
     """
     Retourne les métriques de drift avec filtres optionnels.
     """
@@ -348,15 +275,17 @@ def get_drift_metrics(
     service = MonitoringService(db)
 
     try:
-        return service.get_drift_metrics(
+        payload = service.get_drift_metrics(
             limit=limit,
             model_name=model_name,
             model_version=model_version,
             feature_name=feature_name,
+            metric_name=metric_name,
             drift_detected=drift_detected,
             window_start=window_start,
             window_end=window_end,
         )
+        return GenericItemsResponse(**payload)
 
     except Exception as exc:
         raise HTTPException(
@@ -367,6 +296,7 @@ def get_drift_metrics(
 
 @router.get(
     "/evaluation",
+    response_model=GenericItemsResponse,
     summary="Retourne les métriques d'évaluation",
 )
 def get_evaluation_metrics(
@@ -378,7 +308,7 @@ def get_evaluation_metrics(
     window_end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> GenericItemsResponse:
     """
     Retourne les métriques d'évaluation avec filtres optionnels.
     """
@@ -386,7 +316,7 @@ def get_evaluation_metrics(
     service = MonitoringService(db)
 
     try:
-        return service.get_evaluation_metrics(
+        payload = service.get_evaluation_metrics(
             limit=limit,
             model_name=model_name,
             model_version=model_version,
@@ -394,6 +324,7 @@ def get_evaluation_metrics(
             window_start=window_start,
             window_end=window_end,
         )
+        return GenericItemsResponse(**payload)
 
     except Exception as exc:
         raise HTTPException(
@@ -404,6 +335,7 @@ def get_evaluation_metrics(
 
 @router.get(
     "/feature-store",
+    response_model=GenericItemsResponse,
     summary="Retourne le feature store de monitoring",
 )
 def get_feature_store(
@@ -413,11 +345,12 @@ def get_feature_store(
     feature_name: str | None = Query(default=None),
     model_name: str | None = Query(default=None),
     model_version: str | None = Query(default=None),
+    source_table: str | None = Query(default=None),
     window_start: datetime | None = Query(default=None),
     window_end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> GenericItemsResponse:
     """
     Retourne les snapshots de features stockés pour le monitoring.
     """
@@ -425,16 +358,18 @@ def get_feature_store(
     service = MonitoringService(db)
 
     try:
-        return service.get_feature_store(
+        payload = service.get_feature_store(
             limit=limit,
             request_id=request_id,
             client_id=client_id,
             feature_name=feature_name,
             model_name=model_name,
             model_version=model_version,
+            source_table=source_table,
             window_start=window_start,
             window_end=window_end,
         )
+        return GenericItemsResponse(**payload)
 
     except Exception as exc:
         raise HTTPException(
@@ -449,17 +384,20 @@ def get_feature_store(
 
 @router.get(
     "/alerts",
+    response_model=AlertListResponse,
     summary="Retourne les alertes récentes",
 )
 def get_recent_alerts(
     limit: int = Query(default=50, ge=1, le=500),
     alert_status: str | None = Query(default=None, alias="status"),
     severity: str | None = Query(default=None),
+    alert_type: str | None = Query(default=None),
     model_name: str | None = Query(default=None),
     model_version: str | None = Query(default=None),
+    feature_name: str | None = Query(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> AlertListResponse:
     """
     Retourne les alertes de monitoring récentes avec filtres optionnels.
     """
@@ -470,16 +408,18 @@ def get_recent_alerts(
             limit=limit,
             status=alert_status,
             severity=severity,
+            alert_type=alert_type,
             model_name=model_name,
             model_version=model_version,
+            feature_name=feature_name,
         )
 
-        items = [_serialize_alert(alert).model_dump() for alert in alerts]
+        items = [_serialize_alert(alert) for alert in alerts]
 
-        return {
-            "count": len(items),
-            "items": items,
-        }
+        return AlertListResponse(
+            count=len(items),
+            items=items,
+        )
 
     except Exception as exc:
         raise HTTPException(
@@ -584,6 +524,7 @@ def resolve_alert(
 
 @router.get(
     "/summary",
+    response_model=MonitoringSummaryResponse,
     summary="Retourne une synthèse de monitoring",
 )
 def get_monitoring_summary(
@@ -593,7 +534,7 @@ def get_monitoring_summary(
     window_end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> MonitoringSummaryResponse:
     """
     Retourne une synthèse du monitoring sur un modèle.
     """
@@ -601,12 +542,13 @@ def get_monitoring_summary(
     service = MonitoringService(db)
 
     try:
-        return service.get_monitoring_summary(
+        payload = service.get_monitoring_summary(
             model_name=model_name,
             model_version=model_version,
             window_start=window_start,
             window_end=window_end,
         )
+        return MonitoringSummaryResponse(**payload)
 
     except Exception as exc:
         raise HTTPException(
@@ -617,6 +559,7 @@ def get_monitoring_summary(
 
 @router.get(
     "/health",
+    response_model=MonitoringHealthResponse,
     summary="Retourne un état simple du monitoring",
 )
 def get_monitoring_health(
@@ -626,7 +569,7 @@ def get_monitoring_health(
     window_end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> MonitoringHealthResponse:
     """
     Retourne un état simple et lisible du monitoring.
     """
@@ -634,12 +577,13 @@ def get_monitoring_health(
     service = MonitoringService(db)
 
     try:
-        return service.get_monitoring_health(
+        payload = service.get_monitoring_health(
             model_name=model_name,
             model_version=model_version,
             window_start=window_start,
             window_end=window_end,
         )
+        return MonitoringHealthResponse(**payload)
 
     except Exception as exc:
         raise HTTPException(

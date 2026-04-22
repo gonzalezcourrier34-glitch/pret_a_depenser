@@ -2,7 +2,7 @@
 Page Streamlit : prédictions, données stockées et snapshot des features.
 
 Cette page regroupe :
-- la prédiction via un client chargé depuis une source exposée par l'API
+- la prédiction via un client existant déjà connu de l'API
 - la prédiction via un JSON libre
 - la prédiction batch via JSON
 - le lancement de batches de simulation
@@ -14,12 +14,6 @@ Notes
 -----
 Cette page ne lit pas directement PostgreSQL.
 Toutes les données doivent être récupérées via l'API FastAPI.
-
-Tables métier visées
---------------------
-- prediction_logs
-- ground_truth_labels
-- prediction_features_snapshot
 """
 
 from __future__ import annotations
@@ -83,6 +77,70 @@ def _render_section_title(title: str, subtitle: str = "") -> None:
     )
 
 
+def _render_prediction_result_card(result: dict[str, Any]) -> None:
+    """
+    Affiche un résultat de prédiction unitaire de façon lisible.
+    """
+    if not isinstance(result, dict) or not result:
+        st.info("Aucun résultat de prédiction à afficher.")
+        return
+
+    prediction = result.get("prediction")
+    score = result.get("score")
+    model_version = result.get("model_version", "unknown")
+    latency_ms = result.get("latency_ms")
+    request_id = result.get("request_id", "-")
+
+    if prediction == 0:
+        decision_label = "Crédit accepté"
+        decision_color = "#10B981"
+    elif prediction == 1:
+        decision_label = "Crédit refusé"
+        decision_color = "#EF4444"
+    else:
+        decision_label = "Décision inconnue"
+        decision_color = "#6B7280"
+
+    score_display = (
+        f"{_safe_float(score):.4f}" if score is not None else "N/A"
+    )
+    latency_display = (
+        f"{_safe_float(latency_ms):.2f} ms" if latency_ms is not None else "N/A"
+    )
+
+    st.markdown(
+        f"""
+        <div style="
+            padding: 20px 22px;
+            border-radius: 18px;
+            background: linear-gradient(135deg, #111827 0%, #1f2937 100%);
+            border: 1px solid rgba(255,255,255,0.08);
+            box-shadow: 0 8px 22px rgba(0,0,0,0.10);
+            margin-bottom: 14px;
+        ">
+            <div style="font-size: 0.95rem; color: #9CA3AF; margin-bottom: 8px;">
+                Résultat de la prédiction
+            </div>
+            <div style="
+                font-size: 1.6rem;
+                font-weight: 800;
+                color: {decision_color};
+                margin-bottom: 12px;
+            ">
+                {decision_label}
+            </div>
+            <div style="color: white; font-size: 0.95rem; line-height: 1.8;">
+                <strong>Score :</strong> {score_display}<br>
+                <strong>Version modèle :</strong> {model_version}<br>
+                <strong>Latence :</strong> {latency_display}<br>
+                <strong>Request ID :</strong> {request_id}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _safe_json_text(value: Any) -> str:
     """
     Sérialise proprement une structure Python en JSON lisible.
@@ -124,7 +182,10 @@ def _safe_numeric_series(df: pd.DataFrame, col: str) -> pd.DataFrame:
     return out
 
 
-def _coerce_columns_to_datetime(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+def _coerce_columns_to_datetime(
+    df: pd.DataFrame,
+    columns: Iterable[str],
+) -> pd.DataFrame:
     """
     Convertit plusieurs colonnes en datetime si elles existent.
     """
@@ -134,7 +195,10 @@ def _coerce_columns_to_datetime(df: pd.DataFrame, columns: Iterable[str]) -> pd.
     return out
 
 
-def _coerce_columns_to_numeric(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+def _coerce_columns_to_numeric(
+    df: pd.DataFrame,
+    columns: Iterable[str],
+) -> pd.DataFrame:
     """
     Convertit plusieurs colonnes en numérique si elles existent.
     """
@@ -168,7 +232,10 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _choose_existing_columns(df: pd.DataFrame, preferred_cols: list[str]) -> list[str]:
+def _choose_existing_columns(
+    df: pd.DataFrame,
+    preferred_cols: list[str],
+) -> list[str]:
     """
     Retourne uniquement les colonnes présentes dans le DataFrame.
     """
@@ -178,14 +245,6 @@ def _choose_existing_columns(df: pd.DataFrame, preferred_cols: list[str]) -> lis
 def _snapshot_to_dataframe(snapshot: Any) -> pd.DataFrame:
     """
     Convertit un retour de snapshot en DataFrame de façon robuste.
-
-    Cas gérés
-    ---------
-    - dict avec clé "features" = list[dict]
-    - dict avec clé "features" = dict
-    - dict avec clé "items" = list[dict]
-    - list[dict]
-    - DataFrame déjà prêt
     """
     if isinstance(snapshot, pd.DataFrame):
         return snapshot.copy()
@@ -217,12 +276,21 @@ def _snapshot_to_dataframe(snapshot: Any) -> pd.DataFrame:
 def _normalize_prediction_result(result: Any) -> dict[str, Any]:
     """
     Normalise un résultat de prédiction pour l'affichage.
-
-    Si le retour n'est pas un dict, on l'encapsule.
     """
     if isinstance(result, dict):
         return result
     return {"result": result}
+
+
+def _extract_batch_items(result: Any) -> pd.DataFrame:
+    """
+    Extrait les items d'un résultat batch/simulation.
+    """
+    if isinstance(result, dict):
+        items = result.get("items")
+        if isinstance(items, list):
+            return pd.DataFrame(items)
+    return pd.DataFrame()
 
 
 # =============================================================================
@@ -231,11 +299,9 @@ def _normalize_prediction_result(result: Any) -> dict[str, Any]:
 
 def render_predictions_page(
     *,
-    ALLOWED_FEATURES_TABLES: set[str],
     prediction_logs_df: pd.DataFrame,
     ground_truth_df: pd.DataFrame,
-    load_client_features,
-    dataframe_to_payload,
+    call_predict_client_api,
     call_predict_api,
     call_predict_batch_api,
     get_prediction_detail,
@@ -247,35 +313,6 @@ def render_predictions_page(
 ) -> None:
     """
     Affiche la page prédictions, données stockées et snapshot des features.
-
-    Parameters
-    ----------
-    ALLOWED_FEATURES_TABLES : set[str]
-        Tables autorisées pour charger un client.
-    prediction_logs_df : pd.DataFrame
-        Historique des prédictions.
-    ground_truth_df : pd.DataFrame
-        Historique des vérités terrain.
-    load_client_features :
-        Fonction de chargement des features depuis l'API.
-    dataframe_to_payload :
-        Conversion d'un DataFrame vers un payload API.
-    call_predict_api :
-        Appel à l'endpoint /predict.
-    call_predict_batch_api :
-        Appel à l'endpoint /predict/batch.
-    get_prediction_detail :
-        Récupération du détail d'une prédiction.
-    get_prediction_features_snapshot :
-        Récupération du snapshot de features.
-    get_ground_truth_by_request_id :
-        Récupération de la vérité terrain.
-    metric_safe_number :
-        Calcul robuste de métriques.
-    call_predict_real_random_batch_api :
-        Appel optionnel à la route batch aléatoire basée sur données réelles.
-    call_predict_fully_random_batch_api :
-        Appel optionnel à la route batch complètement aléatoire.
     """
     prediction_logs_df = _safe_dataframe(prediction_logs_df)
     ground_truth_df = _safe_dataframe(ground_truth_df)
@@ -286,7 +323,7 @@ def render_predictions_page(
     )
     prediction_logs_df = _coerce_columns_to_numeric(
         prediction_logs_df,
-        ["prediction", "score", "threshold_used", "latency_ms", "status_code"],
+        ["prediction", "score", "threshold", "latency_ms"],
     )
 
     ground_truth_df = _coerce_columns_to_datetime(
@@ -295,17 +332,8 @@ def render_predictions_page(
     )
     ground_truth_df = _coerce_columns_to_numeric(
         ground_truth_df,
-        ["true_label", "client_id"],
+        ["ground_truth", "client_id"],
     )
-
-    # ---------------------------------------------------------------------
-    # Initialisation session_state
-    # ---------------------------------------------------------------------
-    if "last_loaded_client_df" not in st.session_state:
-        st.session_state["last_loaded_client_df"] = pd.DataFrame()
-
-    if "last_payload_preview" not in st.session_state:
-        st.session_state["last_payload_preview"] = {}
 
     if "last_prediction_result" not in st.session_state:
         st.session_state["last_prediction_result"] = None
@@ -316,9 +344,6 @@ def render_predictions_page(
     if "last_simulation_result" not in st.session_state:
         st.session_state["last_simulation_result"] = None
 
-    # ---------------------------------------------------------------------
-    # Header
-    # ---------------------------------------------------------------------
     st.markdown("## Prédictions et traçabilité")
     st.caption(
         "Lancer des prédictions, simuler des batches, consulter l’historique et inspecter les données stockées."
@@ -330,10 +355,20 @@ def render_predictions_page(
     p99_latency = metric_safe_number(prediction_logs_df, "latency_ms", "p99", 0)
 
     error_rate = 0.0
-    if not prediction_logs_df.empty and "status_code" in prediction_logs_df.columns:
-        status_codes = pd.to_numeric(prediction_logs_df["status_code"], errors="coerce")
-        if status_codes.notna().any():
-            error_rate = float((status_codes >= 400).mean() * 100)
+    if not prediction_logs_df.empty:
+        if "error_message" in prediction_logs_df.columns:
+            error_rate = float(
+                prediction_logs_df["error_message"].notna().mean() * 100
+            )
+        elif "status" in prediction_logs_df.columns:
+            error_rate = float(
+                prediction_logs_df["status"]
+                .fillna("")
+                .astype(str)
+                .str.lower()
+                .eq("error")
+                .mean() * 100
+            )
 
     avg_score = None
     if not prediction_logs_df.empty and "score" in prediction_logs_df.columns:
@@ -341,18 +376,40 @@ def render_predictions_page(
 
     k1, k2, k3, k4, k5 = st.columns(5)
     with k1:
-        _render_card("Total prédictions", total_predictions, "Historique actuellement chargé")
+        _render_card(
+            "Total prédictions",
+            total_predictions,
+            "Historique actuellement chargé",
+        )
     with k2:
-        _render_card("Latence moyenne", f"{_safe_float(mean_latency):.2f} ms", "Temps moyen d’inférence")
+        _render_card(
+            "Latence moyenne",
+            f"{_safe_float(mean_latency):.2f} ms",
+            "Temps moyen d’inférence",
+        )
     with k3:
-        _render_card("Latence p95", f"{_safe_float(p95_latency):.2f} ms", "Queue de distribution")
+        _render_card(
+            "Latence p95",
+            f"{_safe_float(p95_latency):.2f} ms",
+            "Queue de distribution",
+        )
     with k4:
-        _render_card("Latence p99", f"{_safe_float(p99_latency):.2f} ms", "Cas extrêmes")
+        _render_card(
+            "Latence p99",
+            f"{_safe_float(p99_latency):.2f} ms",
+            "Cas extrêmes",
+        )
     with k5:
-        _render_card("Erreur", f"{error_rate:.1f} %", "Taux basé sur les status_code")
+        _render_card(
+            "Erreur",
+            f"{error_rate:.1f} %",
+            "Taux basé sur les logs",
+        )
 
     if avg_score is not None:
-        st.caption(f"Score moyen observé dans l’historique : {_safe_float(avg_score):.4f}")
+        st.caption(
+            f"Score moyen observé dans l’historique : {_safe_float(avg_score):.4f}"
+        )
 
     tabs = st.tabs(
         [
@@ -374,84 +431,80 @@ def render_predictions_page(
 
         subtabs = st.tabs(["Depuis un client", "Depuis un JSON libre"])
 
-        # -----------------------------------------------------------------
-        # Depuis un client
-        # -----------------------------------------------------------------
         with subtabs[0]:
-            box1, box2 = st.columns([1, 1])
+            client_id = st.number_input(
+                "SK_ID_CURR",
+                min_value=100000,
+                max_value=999999,
+                value=100001,
+                step=1,
+            )
 
-            with box1:
-                client_id = st.number_input(
-                    "SK_ID_CURR",
-                    min_value=100000,
-                    max_value=999999,
-                    value=100001,
-                    step=1,
-                )
+            if st.button(
+                "Lancer la prédiction du client",
+                key="predict_single_client",
+                use_container_width=True,
+            ):
+                try:
+                    ok, result = call_predict_client_api(int(client_id))
 
-            with box2:
-                source_table = st.selectbox(
-                    "Table source",
-                    options=sorted(ALLOWED_FEATURES_TABLES) if ALLOWED_FEATURES_TABLES else [],
-                )
+                    if ok:
+                        st.session_state["last_prediction_result"] = _normalize_prediction_result(result)
+                        st.success("Prédiction reçue.")
+                    else:
+                        error_result = _normalize_prediction_result(result)
+                        error_message = error_result.get("detail", "Erreur API.")
+                        st.error(error_message)
+                        st.session_state["last_prediction_result"] = error_result
 
-            action_col1, action_col2 = st.columns([1, 1])
-
-            with action_col1:
-                if st.button("Charger le client", key="load_client", use_container_width=True):
-                    try:
-                        client_df = load_client_features(int(client_id), source_table)
-
-                        if not isinstance(client_df, pd.DataFrame) or client_df.empty:
-                            st.error("Aucune donnée trouvée.")
-                            st.session_state["last_loaded_client_df"] = pd.DataFrame()
-                            st.session_state["last_payload_preview"] = {}
-                        else:
-                            payload = dataframe_to_payload(client_df)
-                            st.session_state["last_loaded_client_df"] = client_df
-                            st.session_state["last_payload_preview"] = payload
-                            st.success("Client chargé avec succès.")
-                    except Exception as e:
-                        st.error(f"Erreur lors du chargement client : {e}")
-                        st.session_state["last_loaded_client_df"] = pd.DataFrame()
-                        st.session_state["last_payload_preview"] = {}
-
-            client_df = st.session_state["last_loaded_client_df"]
-            payload = st.session_state["last_payload_preview"]
-
-            if isinstance(client_df, pd.DataFrame) and not client_df.empty:
-                st.markdown("#### Données chargées")
-                st.dataframe(client_df, width="stretch")
-
-                with st.expander("Voir le payload JSON généré", expanded=False):
-                    st.json(payload)
-
-                with action_col2:
-                    if st.button(
-                        "Envoyer à l'API",
-                        key="predict_single_client",
-                        use_container_width=True,
-                    ):
-                        try:
-                            ok, result = call_predict_api(payload)
-
-                            if ok:
-                                st.session_state["last_prediction_result"] = _normalize_prediction_result(result)
-                                st.success("Prédiction reçue.")
-                            else:
-                                st.error("Erreur API.")
-                                st.session_state["last_prediction_result"] = _normalize_prediction_result(result)
-                        except Exception as e:
-                            st.error(f"Erreur lors de l'appel API : {e}")
-                            st.session_state["last_prediction_result"] = {"error": str(e)}
+                except Exception as e:
+                    st.error(f"Erreur lors de l'appel API : {e}")
+                    st.session_state["last_prediction_result"] = {"error": str(e)}
 
             if st.session_state["last_prediction_result"] is not None:
-                st.markdown("#### Dernier résultat")
-                st.json(st.session_state["last_prediction_result"])
+                st.markdown("#### Résultat de la prédiction")
+                prediction_result = st.session_state["last_prediction_result"]
 
-        # -----------------------------------------------------------------
-        # JSON libre
-        # -----------------------------------------------------------------
+                if isinstance(prediction_result, dict) and "error" not in prediction_result and "detail" not in prediction_result:
+                    _render_prediction_result_card(prediction_result)
+
+                    result_col1, result_col2, result_col3, result_col4 = st.columns(4)
+
+                    with result_col1:
+                        decision = prediction_result.get("prediction")
+                        _render_card(
+                            "Décision",
+                            "Accepté" if decision == 0 else "Refusé" if decision == 1 else "Inconnu",
+                            "Décision calculée par seuil",
+                        )
+
+                    with result_col2:
+                        _render_card(
+                            "Score",
+                            f"{_safe_float(prediction_result.get('score')):.4f}",
+                            "Probabilité de défaut",
+                        )
+
+                    with result_col3:
+                        _render_card(
+                            "Version modèle",
+                            prediction_result.get("model_version", "unknown"),
+                            "Version utilisée",
+                        )
+
+                    with result_col4:
+                        _render_card(
+                            "Latence",
+                            f"{_safe_float(prediction_result.get('latency_ms')):.2f} ms",
+                            "Temps d'inférence",
+                        )
+
+                    with st.expander("Voir la réponse JSON complète", expanded=False):
+                        st.json(prediction_result)
+                else:
+                    st.error("Le client demandé n'est pas disponible pour la prédiction.")
+                    st.json(prediction_result)
+
         with subtabs[1]:
             template = {
                 "SK_ID_CURR": 100001,
@@ -472,7 +525,11 @@ def render_predictions_page(
             except Exception as e:
                 st.error(f"Erreur JSON : {e}")
 
-            if st.button("Envoyer le JSON à l'API", key="send_free_json", use_container_width=True):
+            if st.button(
+                "Envoyer le JSON à l'API",
+                key="send_free_json",
+                use_container_width=True,
+            ):
                 if parsed is None:
                     st.error("Le JSON n'est pas valide.")
                 else:
@@ -480,23 +537,67 @@ def render_predictions_page(
                         ok, result = call_predict_api(parsed)
 
                         if ok:
-                            st.session_state["last_prediction_result"] = _normalize_prediction_result(result)
+                            st.session_state["last_prediction_result"] = (
+                                _normalize_prediction_result(result)
+                            )
                             st.success("Prédiction reçue.")
                         else:
                             st.error("Erreur API.")
-                            st.session_state["last_prediction_result"] = _normalize_prediction_result(result)
+                            st.session_state["last_prediction_result"] = (
+                                _normalize_prediction_result(result)
+                            )
                     except Exception as e:
                         st.error(f"Erreur lors de l'appel API : {e}")
                         st.session_state["last_prediction_result"] = {"error": str(e)}
 
             if st.session_state["last_prediction_result"] is not None:
                 st.markdown("#### Dernier résultat")
-                st.json(st.session_state["last_prediction_result"])
+                prediction_result = st.session_state["last_prediction_result"]
+
+                if (
+                    isinstance(prediction_result, dict)
+                    and "error" not in prediction_result
+                ):
+                    _render_prediction_result_card(prediction_result)
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    with c1:
+                        decision = prediction_result.get("prediction")
+                        _render_card(
+                            "Décision",
+                            (
+                                "Accepté"
+                                if decision == 0
+                                else "Refusé"
+                                if decision == 1
+                                else "Inconnu"
+                            ),
+                        )
+                    with c2:
+                        _render_card(
+                            "Score",
+                            f"{_safe_float(prediction_result.get('score')):.4f}",
+                        )
+                    with c3:
+                        _render_card(
+                            "Version modèle",
+                            prediction_result.get("model_version", "unknown"),
+                        )
+                    with c4:
+                        _render_card(
+                            "Latence",
+                            f"{_safe_float(prediction_result.get('latency_ms')):.2f} ms",
+                        )
+
+                    with st.expander("Voir la réponse JSON complète", expanded=False):
+                        st.json(prediction_result)
+                else:
+                    st.json(prediction_result)
 
         st.markdown("")
         _render_section_title(
             "Historique des prédictions",
-            "Vue consolidée des prédictions déjà journalisées.",
+            "Vue séparée des crédits acceptés et refusés déjà journalisés.",
         )
 
         if prediction_logs_df.empty:
@@ -511,27 +612,81 @@ def render_predictions_page(
                     na_position="last",
                 )
 
-            preferred_cols = _choose_existing_columns(
-                history_view,
+            accepted_df = pd.DataFrame()
+            refused_df = pd.DataFrame()
+
+            if "prediction" in history_view.columns:
+                accepted_df = history_view[history_view["prediction"] == 0].copy()
+                refused_df = history_view[history_view["prediction"] == 1].copy()
+
+                if not accepted_df.empty:
+                    accepted_df["decision_credit"] = "Accepté"
+                if not refused_df.empty:
+                    refused_df["decision_credit"] = "Refusé"
+            else:
+                st.warning("La colonne `prediction` est absente de l’historique.")
+
+            accepted_cols = _choose_existing_columns(
+                accepted_df,
                 [
                     "prediction_timestamp",
                     "request_id",
                     "client_id",
                     "model_name",
                     "model_version",
+                    "decision_credit",
                     "prediction",
                     "score",
-                    "threshold_used",
+                    "threshold",
                     "latency_ms",
-                    "status_code",
+                    "status",
                     "error_message",
                 ],
             )
 
-            st.dataframe(
-                history_view[preferred_cols] if preferred_cols else history_view,
-                width="stretch",
+            refused_cols = _choose_existing_columns(
+                refused_df,
+                [
+                    "prediction_timestamp",
+                    "request_id",
+                    "client_id",
+                    "model_name",
+                    "model_version",
+                    "decision_credit",
+                    "prediction",
+                    "score",
+                    "threshold",
+                    "latency_ms",
+                    "status",
+                    "error_message",
+                ],
             )
+
+            c1, c2 = st.columns(2)
+
+            with c1:
+                st.markdown("### Demandes de crédit acceptées")
+                st.caption(f"{len(accepted_df)} demande(s) acceptée(s)")
+
+                if accepted_df.empty:
+                    st.info("Aucune demande de crédit acceptée trouvée.")
+                else:
+                    st.dataframe(
+                        accepted_df[accepted_cols] if accepted_cols else accepted_df,
+                        width="stretch",
+                    )
+
+            with c2:
+                st.markdown("### Demandes de crédit refusées")
+                st.caption(f"{len(refused_df)} demande(s) refusée(s)")
+
+                if refused_df.empty:
+                    st.info("Aucune demande de crédit refusée trouvée.")
+                else:
+                    st.dataframe(
+                        refused_df[refused_cols] if refused_cols else refused_df,
+                        width="stretch",
+                    )
 
     # =====================================================================
     # ONGLET 2 - BATCHES & SIMULATIONS
@@ -543,12 +698,13 @@ def render_predictions_page(
         )
 
         subtabs_batch = st.tabs(
-            ["Batch JSON libre", "Simulation réelle aléatoire", "Simulation totalement aléatoire"]
+            [
+                "Batch JSON libre",
+                "Simulation réelle aléatoire",
+                "Simulation totalement aléatoire",
+            ]
         )
 
-        # -----------------------------------------------------------------
-        # Batch JSON manuel
-        # -----------------------------------------------------------------
         with subtabs_batch[0]:
             batch_text = st.text_area(
                 "Batch JSON",
@@ -570,7 +726,11 @@ def render_predictions_page(
             except Exception as e:
                 st.error(f"Erreur JSON : {e}")
 
-            if st.button("Envoyer le batch JSON", key="send_manual_batch", use_container_width=True):
+            if st.button(
+                "Envoyer le batch JSON",
+                key="send_manual_batch",
+                use_container_width=True,
+            ):
                 if not is_valid_batch:
                     st.error("Le batch JSON n'est pas valide.")
                 else:
@@ -578,18 +738,19 @@ def render_predictions_page(
                         ok, result = call_predict_batch_api(parsed_batch)
 
                         if ok:
-                            st.session_state["last_batch_result"] = _normalize_prediction_result(result)
+                            st.session_state["last_batch_result"] = (
+                                _normalize_prediction_result(result)
+                            )
                             st.success("Batch traité avec succès.")
                         else:
                             st.error("Erreur batch.")
-                            st.session_state["last_batch_result"] = _normalize_prediction_result(result)
+                            st.session_state["last_batch_result"] = (
+                                _normalize_prediction_result(result)
+                            )
                     except Exception as e:
                         st.error(f"Erreur lors de l'appel batch : {e}")
                         st.session_state["last_batch_result"] = {"error": str(e)}
 
-        # -----------------------------------------------------------------
-        # Simulation réelle aléatoire
-        # -----------------------------------------------------------------
         with subtabs_batch[1]:
             st.info(
                 "Cette simulation envoie un lot de prédictions construit à partir de données réelles "
@@ -619,7 +780,9 @@ def render_predictions_page(
             )
 
             if call_predict_real_random_batch_api is None:
-                st.warning("La route batch réelle aléatoire n'est pas branchée côté dashboard.")
+                st.warning(
+                    "La route batch réelle aléatoire n'est pas branchée côté dashboard."
+                )
             else:
                 if st.button(
                     "Lancer les prédictions réelles aléatoires",
@@ -633,18 +796,19 @@ def render_predictions_page(
                         )
 
                         if ok:
-                            st.session_state["last_simulation_result"] = _normalize_prediction_result(result)
+                            st.session_state["last_simulation_result"] = (
+                                _normalize_prediction_result(result)
+                            )
                             st.success("Simulation réelle aléatoire terminée.")
                         else:
                             st.error("Erreur lors de la simulation.")
-                            st.session_state["last_simulation_result"] = _normalize_prediction_result(result)
+                            st.session_state["last_simulation_result"] = (
+                                _normalize_prediction_result(result)
+                            )
                     except Exception as e:
                         st.error(f"Erreur lors de la simulation : {e}")
                         st.session_state["last_simulation_result"] = {"error": str(e)}
 
-        # -----------------------------------------------------------------
-        # Simulation totalement aléatoire
-        # -----------------------------------------------------------------
         with subtabs_batch[2]:
             st.info(
                 "Cette simulation envoie un lot de prédictions généré à partir de données entièrement "
@@ -661,7 +825,9 @@ def render_predictions_page(
             )
 
             if call_predict_fully_random_batch_api is None:
-                st.warning("La route batch totalement aléatoire n'est pas branchée côté dashboard.")
+                st.warning(
+                    "La route batch totalement aléatoire n'est pas branchée côté dashboard."
+                )
             else:
                 if st.button(
                     "Lancer les prédictions totalement aléatoires",
@@ -674,11 +840,15 @@ def render_predictions_page(
                         )
 
                         if ok:
-                            st.session_state["last_simulation_result"] = _normalize_prediction_result(result)
+                            st.session_state["last_simulation_result"] = (
+                                _normalize_prediction_result(result)
+                            )
                             st.success("Simulation totalement aléatoire terminée.")
                         else:
                             st.error("Erreur lors de la simulation.")
-                            st.session_state["last_simulation_result"] = _normalize_prediction_result(result)
+                            st.session_state["last_simulation_result"] = (
+                                _normalize_prediction_result(result)
+                            )
                     except Exception as e:
                         st.error(f"Erreur lors de la simulation : {e}")
                         st.session_state["last_simulation_result"] = {"error": str(e)}
@@ -689,9 +859,21 @@ def render_predictions_page(
             st.markdown("##### Dernier batch manuel")
             st.json(st.session_state["last_batch_result"])
 
+            batch_items_df = _extract_batch_items(
+                st.session_state["last_batch_result"]
+            )
+            if not batch_items_df.empty:
+                st.dataframe(batch_items_df, width="stretch")
+
         if st.session_state["last_simulation_result"] is not None:
             st.markdown("##### Dernière simulation")
             st.json(st.session_state["last_simulation_result"])
+
+            simulation_items_df = _extract_batch_items(
+                st.session_state["last_simulation_result"]
+            )
+            if not simulation_items_df.empty:
+                st.dataframe(simulation_items_df, width="stretch")
 
     # =====================================================================
     # ONGLET 3 - DONNÉES STOCKÉES
@@ -729,7 +911,9 @@ def render_predictions_page(
                     try:
                         detail = get_prediction_detail(selected)
                     except Exception as e:
-                        st.error(f"Erreur lors de la récupération du détail : {e}")
+                        st.error(
+                            f"Erreur lors de la récupération du détail : {e}"
+                        )
 
                     if detail:
                         st.markdown("#### Détail de la prédiction")
@@ -750,7 +934,9 @@ def render_predictions_page(
                             ground_truth_df=ground_truth_df,
                         )
                     except Exception as e:
-                        st.error(f"Erreur lors de la récupération de la vérité terrain : {e}")
+                        st.error(
+                            f"Erreur lors de la récupération de la vérité terrain : {e}"
+                        )
 
                     st.markdown("#### Vérité terrain associée")
 
@@ -761,7 +947,7 @@ def render_predictions_page(
                             [
                                 "request_id",
                                 "client_id",
-                                "true_label",
+                                "ground_truth",
                                 "label_source",
                                 "observed_at",
                                 "notes",
@@ -774,7 +960,9 @@ def render_predictions_page(
                     elif isinstance(gt, dict) and gt:
                         st.dataframe(pd.DataFrame([gt]), width="stretch")
                     else:
-                        st.info("Aucune vérité terrain trouvée pour cette requête.")
+                        st.info(
+                            "Aucune vérité terrain trouvée pour cette requête."
+                        )
 
     # =====================================================================
     # ONGLET 4 - SNAPSHOT DES FEATURES
@@ -812,22 +1000,25 @@ def render_predictions_page(
                     try:
                         snapshot = get_prediction_features_snapshot(selected)
                     except Exception as e:
-                        st.error(f"Erreur lors de la récupération du snapshot : {e}")
+                        st.error(
+                            f"Erreur lors de la récupération du snapshot : {e}"
+                        )
 
                     df_snapshot = _snapshot_to_dataframe(snapshot)
 
                     if not df_snapshot.empty:
-                        info1, info2 = st.columns([1, 2])
+                        info1, info2, info3 = st.columns([1, 2, 1])
+
                         with info1:
                             st.metric("Nombre de lignes snapshot", len(df_snapshot))
                         with info2:
                             st.caption(f"request_id : {selected}")
-
-                        if "feature_name" in df_snapshot.columns:
-                            st.metric(
-                                "Features distinctes",
-                                df_snapshot["feature_name"].nunique(),
-                            )
+                        with info3:
+                            if "feature_name" in df_snapshot.columns:
+                                st.metric(
+                                    "Features distinctes",
+                                    df_snapshot["feature_name"].nunique(),
+                                )
 
                         preferred_cols = _choose_existing_columns(
                             df_snapshot,
@@ -844,7 +1035,9 @@ def render_predictions_page(
                         )
 
                         st.dataframe(
-                            df_snapshot[preferred_cols] if preferred_cols else df_snapshot,
+                            df_snapshot[preferred_cols]
+                            if preferred_cols
+                            else df_snapshot,
                             width="stretch",
                         )
 

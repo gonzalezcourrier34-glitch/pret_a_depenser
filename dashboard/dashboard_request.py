@@ -22,6 +22,7 @@ Endpoints concernés
 Prédiction
 - GET /predict/health
 - POST /predict
+- GET /predict/{client_id}
 - POST /predict/batch
 - POST /predict/simulate/real-sample
 - POST /predict/simulate/random
@@ -34,6 +35,7 @@ Historique
 
 Monitoring
 - GET /monitoring/summary
+- GET /monitoring/health
 - GET /monitoring/models
 - GET /monitoring/active-model
 - GET /monitoring/drift
@@ -66,16 +68,6 @@ DEFAULT_SIMULATION_TIMEOUT = 120
 def build_headers(api_key: str | None = None) -> dict[str, str]:
     """
     Construit les headers HTTP à envoyer à l'API.
-
-    Parameters
-    ----------
-    api_key : str | None
-        Clé API optionnelle.
-
-    Returns
-    -------
-    dict[str, str]
-        Dictionnaire des headers HTTP.
     """
     headers = {
         "Content-Type": "application/json",
@@ -128,30 +120,6 @@ def call_api(
 ) -> tuple[bool, Any]:
     """
     Appelle un endpoint de l'API FastAPI.
-
-    Parameters
-    ----------
-    endpoint : str
-        Endpoint relatif, par exemple `/monitoring/summary`.
-    base_url : str
-        URL de base de l'API.
-    api_key : str | None
-        Clé API optionnelle.
-    method : str
-        Méthode HTTP à utiliser.
-    params : dict[str, Any] | None
-        Paramètres de requête.
-    json_data : Any | None
-        Corps JSON à envoyer.
-    timeout : int
-        Timeout HTTP en secondes.
-
-    Returns
-    -------
-    tuple[bool, Any]
-        Couple (succès, résultat).
-        - succès = True si la requête a réussi
-        - résultat = JSON de réponse ou détail d'erreur
     """
     normalized_base_url = _normalize_base_url(base_url)
 
@@ -192,22 +160,6 @@ def call_api(
 def items_payload_to_dataframe(payload: Any) -> pd.DataFrame:
     """
     Convertit une réponse API en DataFrame.
-
-    Cas supportés
-    -------------
-    - payload = {"items": [...]}
-    - payload = [...]
-    - payload = {"data": [...]}
-
-    Parameters
-    ----------
-    payload : Any
-        Réponse JSON de l'API.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame construit à partir du contenu exploitable.
     """
     if isinstance(payload, pd.DataFrame):
         return payload.copy()
@@ -229,16 +181,6 @@ def items_payload_to_dataframe(payload: Any) -> pd.DataFrame:
 def dict_payload_to_dataframe(payload: Any) -> pd.DataFrame:
     """
     Convertit un dictionnaire JSON simple en DataFrame à une ligne.
-
-    Parameters
-    ----------
-    payload : Any
-        Réponse JSON de l'API.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame à une ligne ou DataFrame vide.
     """
     if isinstance(payload, pd.DataFrame):
         return payload.copy()
@@ -252,27 +194,11 @@ def dict_payload_to_dataframe(payload: Any) -> pd.DataFrame:
 def dataframe_to_payload(df: pd.DataFrame) -> dict[str, Any]:
     """
     Convertit un DataFrame de features client en payload JSON pour l'API.
-
-    Convention retenue
-    ------------------
-    - si `SK_ID_CURR` est présent, il est remonté au niveau racine
-    - toutes les autres colonnes deviennent `features`
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame contenant idéalement une seule ligne client.
-
-    Returns
-    -------
-    dict[str, Any]
-        Payload JSON prêt à être envoyé à l'API.
     """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return {}
 
     row = df.iloc[0].to_dict()
-
     client_id = row.pop("SK_ID_CURR", None)
 
     payload = {
@@ -292,8 +218,11 @@ def _coerce_datetime_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.Dat
     """
     Convertit une liste de colonnes en datetime si elles existent.
     """
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return pd.DataFrame() if not isinstance(df, pd.DataFrame) else df.copy()
+    if not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+
+    if df.empty:
+        return df.copy()
 
     out = df.copy()
     for col in columns:
@@ -306,8 +235,11 @@ def _coerce_numeric_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.Data
     """
     Convertit une liste de colonnes en numérique si elles existent.
     """
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return pd.DataFrame() if not isinstance(df, pd.DataFrame) else df.copy()
+    if not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+
+    if df.empty:
+        return df.copy()
 
     out = df.copy()
     for col in columns:
@@ -323,7 +255,7 @@ def _postprocess_prediction_logs(df: pd.DataFrame) -> pd.DataFrame:
     df = _coerce_datetime_columns(df, ["prediction_timestamp"])
     df = _coerce_numeric_columns(
         df,
-        ["client_id", "prediction", "score", "threshold_used", "latency_ms", "status_code"],
+        ["client_id", "prediction", "score", "threshold", "latency_ms"],
     )
 
     if "prediction_timestamp" in df.columns:
@@ -337,7 +269,7 @@ def _postprocess_ground_truth(df: pd.DataFrame) -> pd.DataFrame:
     Post-traitement standard des vérités terrain.
     """
     df = _coerce_datetime_columns(df, ["observed_at"])
-    df = _coerce_numeric_columns(df, ["client_id", "true_label"])
+    df = _coerce_numeric_columns(df, ["client_id", "ground_truth"])
 
     if "observed_at" in df.columns:
         df = df.sort_values("observed_at", ascending=False, na_position="last")
@@ -443,16 +375,6 @@ def metric_safe_number(
 ) -> float | int | None:
     """
     Calcule proprement une métrique numérique sur une colonne.
-
-    Metrics supportées
-    ------------------
-    - mean
-    - min
-    - max
-    - median
-    - p95
-    - p99
-    - sum
     """
     if not isinstance(df, pd.DataFrame) or df.empty or col not in df.columns:
         return default
@@ -482,6 +404,13 @@ def metric_safe_number(
 
     return default
 
+def normalize_prediction_result(payload: Any) -> dict[str, Any]:
+    """
+    Normalise un résultat de prédiction unitaire en dictionnaire.
+    """
+    if isinstance(payload, dict):
+        return payload
+    return {"result": payload}
 
 # =============================================================================
 # Endpoints santé / système
@@ -520,6 +449,11 @@ def load_client_features(
 ) -> pd.DataFrame:
     """
     Charge les features d'un client via l'API.
+
+    Notes
+    -----
+    Cet endpoint est optionnel et dépend de l'existence côté API
+    d'une route de type `/features/client/{client_id}`.
     """
     ok, result = call_api(
         f"/features/client/{client_id}",
@@ -550,6 +484,9 @@ def load_client_features(
 # =============================================================================
 # Endpoints prédiction
 # =============================================================================
+# =============================================================================
+# Endpoints prédiction
+# =============================================================================
 
 def call_predict_api(
     payload: dict[str, Any],
@@ -559,7 +496,7 @@ def call_predict_api(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> tuple[bool, Any]:
     """
-    Appelle l'endpoint de prédiction unitaire.
+    Appelle l'endpoint de prédiction unitaire via payload JSON.
     """
     return call_api(
         "/predict",
@@ -567,6 +504,25 @@ def call_predict_api(
         api_key=api_key,
         method="POST",
         json_data=payload,
+        timeout=timeout,
+    )
+
+
+def call_predict_client_api(
+    client_id: int,
+    *,
+    base_url: str,
+    api_key: str,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> tuple[bool, Any]:
+    """
+    Appelle l'endpoint de prédiction unitaire à partir d'un identifiant client.
+    """
+    return call_api(
+        f"/predict/{int(client_id)}",
+        base_url=base_url,
+        api_key=api_key,
+        method="GET",
         timeout=timeout,
     )
 
@@ -644,12 +600,20 @@ def prediction_result_to_dataframe(payload: Any) -> pd.DataFrame:
     return dict_payload_to_dataframe(payload)
 
 
+def normalize_prediction_result(payload: Any) -> dict[str, Any]:
+    """
+    Normalise un résultat de prédiction unitaire en dictionnaire.
+    """
+    if isinstance(payload, dict):
+        return payload
+    return {"result": payload}
+
+
 def simulation_result_to_dataframe(payload: Any) -> pd.DataFrame:
     """
     Convertit un résultat de simulation batch en DataFrame.
     """
     return items_payload_to_dataframe(payload)
-
 
 # =============================================================================
 # Endpoints historique
@@ -663,6 +627,8 @@ def get_prediction_history(
     client_id: int | None = None,
     model_name: str | None = None,
     model_version: str | None = None,
+    only_errors: bool = False,
+    decision: str | None = None,
 ) -> pd.DataFrame:
     """
     Récupère l'historique des prédictions.
@@ -677,6 +643,12 @@ def get_prediction_history(
 
     if model_version is not None:
         params["model_version"] = model_version
+
+    if only_errors:
+        params["only_errors"] = True
+
+    if decision is not None:
+        params["decision"] = decision
 
     ok, result = call_api(
         "/history/predictions",
@@ -752,7 +724,7 @@ def get_prediction_features_snapshot(
     *,
     base_url: str,
     api_key: str,
-) -> dict[str, Any] | list[dict[str, Any]] | None:
+) -> dict[str, Any] | None:
     """
     Récupère le snapshot de features d'une requête.
     """
@@ -763,10 +735,35 @@ def get_prediction_features_snapshot(
         method="GET",
     )
 
-    if ok and isinstance(result, (dict, list)):
+    if ok and isinstance(result, dict):
         return result
 
     return None
+
+
+def get_prediction_features_snapshot_df(
+    request_id: str,
+    *,
+    base_url: str,
+    api_key: str,
+) -> pd.DataFrame:
+    """
+    Récupère le snapshot de features d'une requête et le convertit en DataFrame.
+    """
+    payload = get_prediction_features_snapshot(
+        request_id,
+        base_url=base_url,
+        api_key=api_key,
+    )
+
+    if not payload:
+        return pd.DataFrame()
+
+    items = payload.get("items")
+    if isinstance(items, list):
+        return pd.DataFrame(items)
+
+    return pd.DataFrame()
 
 
 def get_ground_truth_by_request_id(
@@ -825,6 +822,41 @@ def get_monitoring_summary(
 
     ok, result = call_api(
         "/monitoring/summary",
+        base_url=base_url,
+        api_key=api_key,
+        method="GET",
+        params=params,
+    )
+
+    if ok and isinstance(result, dict):
+        return result
+
+    return {}
+
+
+def get_monitoring_health(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str = "credit_scoring_model",
+    model_version: str | None = None,
+    window_start: str | None = None,
+    window_end: str | None = None,
+) -> dict[str, Any]:
+    """
+    Récupère l'état lisible du monitoring.
+    """
+    params: dict[str, Any] = {"model_name": model_name}
+
+    if model_version is not None:
+        params["model_version"] = model_version
+
+    if window_start is not None and window_end is not None:
+        params["window_start"] = window_start
+        params["window_end"] = window_end
+
+    ok, result = call_api(
+        "/monitoring/health",
         base_url=base_url,
         api_key=api_key,
         method="GET",
@@ -949,6 +981,7 @@ def get_drift_metrics(
     model_name: str | None = None,
     model_version: str | None = None,
     feature_name: str | None = None,
+    metric_name: str | None = None,
     drift_detected: bool | None = None,
     window_start: str | None = None,
     window_end: str | None = None,
@@ -966,6 +999,9 @@ def get_drift_metrics(
 
     if feature_name is not None:
         params["feature_name"] = feature_name
+
+    if metric_name is not None:
+        params["metric_name"] = metric_name
 
     if drift_detected is not None:
         params["drift_detected"] = drift_detected
@@ -995,8 +1031,10 @@ def get_alerts(
     limit: int = 200,
     status_filter: str | None = None,
     severity: str | None = None,
+    alert_type: str | None = None,
     model_name: str | None = None,
     model_version: str | None = None,
+    feature_name: str | None = None,
 ) -> pd.DataFrame:
     """
     Récupère les alertes de monitoring.
@@ -1009,11 +1047,17 @@ def get_alerts(
     if severity is not None:
         params["severity"] = severity
 
+    if alert_type is not None:
+        params["alert_type"] = alert_type
+
     if model_name is not None:
         params["model_name"] = model_name
 
     if model_version is not None:
         params["model_version"] = model_version
+
+    if feature_name is not None:
+        params["feature_name"] = feature_name
 
     ok, result = call_api(
         "/monitoring/alerts",
@@ -1039,6 +1083,7 @@ def get_feature_store_monitoring(
     feature_name: str | None = None,
     model_name: str | None = None,
     model_version: str | None = None,
+    source_table: str | None = None,
     window_start: str | None = None,
     window_end: str | None = None,
 ) -> pd.DataFrame:
@@ -1061,6 +1106,9 @@ def get_feature_store_monitoring(
 
     if model_version is not None:
         params["model_version"] = model_version
+
+    if source_table is not None:
+        params["source_table"] = source_table
 
     if window_start is not None and window_end is not None:
         params["window_start"] = window_start

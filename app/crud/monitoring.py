@@ -6,6 +6,7 @@ Ce module contient uniquement les opérations d'accès aux données :
 - insertion des métriques
 - insertion et mise à jour des alertes
 - lecture / mise à jour du registre des modèles
+- écriture du feature store de monitoring
 
 Objectif
 --------
@@ -15,6 +16,8 @@ Notes
 -----
 - Aucune logique métier complexe ne doit vivre ici.
 - Les commits sont laissés à l'appelant.
+- Ce module ne gère que le monitoring.
+- Les objets liés aux prédictions doivent vivre dans crud/prediction.py.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy.orm import Query, Session
+from sqlalchemy.orm import Session
 
 from app.model.model_SQLalchemy import (
     Alert,
@@ -30,8 +33,171 @@ from app.model.model_SQLalchemy import (
     EvaluationMetric,
     FeatureStoreMonitoring,
     ModelRegistry,
-    PredictionLog,
 )
+
+
+# =============================================================================
+# Helpers internes
+# =============================================================================
+
+def _build_drift_metrics_query(
+    db: Session,
+    *,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    feature_name: str | None = None,
+    metric_name: str | None = None,
+    drift_detected: bool | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+):
+    """
+    Construit la requête ORM de base pour drift_metrics.
+    """
+    query = db.query(DriftMetric)
+
+    if model_name is not None:
+        query = query.filter(DriftMetric.model_name == model_name)
+
+    if model_version is not None:
+        query = query.filter(DriftMetric.model_version == model_version)
+
+    if feature_name is not None:
+        query = query.filter(DriftMetric.feature_name == feature_name)
+
+    if metric_name is not None:
+        query = query.filter(DriftMetric.metric_name == metric_name)
+
+    if drift_detected is not None:
+        query = query.filter(DriftMetric.drift_detected.is_(drift_detected))
+
+    if window_start is not None:
+        query = query.filter(DriftMetric.computed_at >= window_start)
+
+    if window_end is not None:
+        query = query.filter(DriftMetric.computed_at < window_end)
+
+    return query
+
+
+def _build_evaluation_metrics_query(
+    db: Session,
+    *,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    dataset_name: str | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+):
+    """
+    Construit la requête ORM de base pour evaluation_metrics.
+    """
+    query = db.query(EvaluationMetric)
+
+    if model_name is not None:
+        query = query.filter(EvaluationMetric.model_name == model_name)
+
+    if model_version is not None:
+        query = query.filter(EvaluationMetric.model_version == model_version)
+
+    if dataset_name is not None:
+        query = query.filter(EvaluationMetric.dataset_name == dataset_name)
+
+    if window_start is not None:
+        query = query.filter(EvaluationMetric.computed_at >= window_start)
+
+    if window_end is not None:
+        query = query.filter(EvaluationMetric.computed_at < window_end)
+
+    return query
+
+
+def _build_feature_store_query(
+    db: Session,
+    *,
+    request_id: str | None = None,
+    client_id: int | None = None,
+    feature_name: str | None = None,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    source_table: str | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+):
+    """
+    Construit la requête ORM de base pour feature_store_monitoring.
+    """
+    query = db.query(FeatureStoreMonitoring)
+
+    if request_id is not None:
+        query = query.filter(FeatureStoreMonitoring.request_id == request_id)
+
+    if client_id is not None:
+        query = query.filter(FeatureStoreMonitoring.client_id == client_id)
+
+    if feature_name is not None:
+        query = query.filter(FeatureStoreMonitoring.feature_name == feature_name)
+
+    if model_name is not None:
+        query = query.filter(FeatureStoreMonitoring.model_name == model_name)
+
+    if model_version is not None:
+        query = query.filter(FeatureStoreMonitoring.model_version == model_version)
+
+    if source_table is not None:
+        query = query.filter(FeatureStoreMonitoring.source_table == source_table)
+
+    if window_start is not None:
+        query = query.filter(FeatureStoreMonitoring.snapshot_timestamp >= window_start)
+
+    if window_end is not None:
+        query = query.filter(FeatureStoreMonitoring.snapshot_timestamp < window_end)
+
+    return query
+
+
+def _build_alerts_query(
+    db: Session,
+    *,
+    status: str | None = None,
+    severity: str | None = None,
+    alert_type: str | None = None,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    feature_name: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+):
+    """
+    Construit la requête ORM de base pour alerts.
+    """
+    query = db.query(Alert)
+
+    if status is not None:
+        query = query.filter(Alert.status == status)
+
+    if severity is not None:
+        query = query.filter(Alert.severity == severity)
+
+    if alert_type is not None:
+        query = query.filter(Alert.alert_type == alert_type)
+
+    if model_name is not None:
+        query = query.filter(Alert.model_name == model_name)
+
+    if model_version is not None:
+        query = query.filter(Alert.model_version == model_version)
+
+    if feature_name is not None:
+        query = query.filter(Alert.feature_name == feature_name)
+
+    if created_after is not None:
+        query = query.filter(Alert.created_at >= created_after)
+
+    if created_before is not None:
+        query = query.filter(Alert.created_at < created_before)
+
+    return query
 
 
 # =============================================================================
@@ -143,6 +309,36 @@ def create_model_record(
     return entity
 
 
+def update_model_record(
+    db: Session,
+    *,
+    entity: ModelRegistry,
+    stage: str,
+    run_id: str | None = None,
+    source_path: str | None = None,
+    training_data_version: str | None = None,
+    feature_list: list[str] | None = None,
+    hyperparameters: dict[str, Any] | None = None,
+    metrics: dict[str, Any] | None = None,
+    deployed_at: datetime | None = None,
+    is_active: bool = False,
+) -> ModelRegistry:
+    """
+    Met à jour un enregistrement modèle existant.
+    """
+    entity.stage = stage
+    entity.run_id = run_id
+    entity.source_path = source_path
+    entity.training_data_version = training_data_version
+    entity.feature_list = feature_list
+    entity.hyperparameters = hyperparameters
+    entity.metrics = metrics
+    entity.deployed_at = deployed_at
+    entity.is_active = is_active
+    db.flush()
+    return entity
+
+
 def deactivate_other_model_versions(
     db: Session,
     *,
@@ -161,6 +357,7 @@ def deactivate_other_model_versions(
         )
         .update({"is_active": False}, synchronize_session=False)
     )
+    db.flush()
 
 
 # =============================================================================
@@ -207,40 +404,79 @@ def create_drift_metric_record(
     return entity
 
 
-def build_drift_metrics_query(
+def list_drift_metrics(
+    db: Session,
+    *,
+    limit: int = 200,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    feature_name: str | None = None,
+    metric_name: str | None = None,
+    drift_detected: bool | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+) -> list[DriftMetric]:
+    """
+    Retourne les métriques de drift filtrées.
+    """
+    query = _build_drift_metrics_query(
+        db,
+        model_name=model_name,
+        model_version=model_version,
+        feature_name=feature_name,
+        metric_name=metric_name,
+        drift_detected=drift_detected,
+        window_start=window_start,
+        window_end=window_end,
+    )
+
+    return query.order_by(DriftMetric.computed_at.desc()).limit(limit).all()
+
+
+def count_drift_metrics(
     db: Session,
     *,
     model_name: str | None = None,
     model_version: str | None = None,
-    feature_name: str | None = None,
     drift_detected: bool | None = None,
     window_start: datetime | None = None,
     window_end: datetime | None = None,
-) -> Query:
+) -> int:
     """
-    Construit la requête ORM pour les métriques de drift.
+    Compte les métriques de drift.
     """
-    query = db.query(DriftMetric)
+    query = _build_drift_metrics_query(
+        db,
+        model_name=model_name,
+        model_version=model_version,
+        drift_detected=drift_detected,
+        window_start=window_start,
+        window_end=window_end,
+    )
 
-    if model_name is not None:
-        query = query.filter(DriftMetric.model_name == model_name)
+    return query.count()
 
-    if model_version is not None:
-        query = query.filter(DriftMetric.model_version == model_version)
 
-    if feature_name is not None:
-        query = query.filter(DriftMetric.feature_name == feature_name)
+def get_latest_drift_metric(
+    db: Session,
+    *,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+) -> DriftMetric | None:
+    """
+    Retourne la dernière métrique de drift.
+    """
+    query = _build_drift_metrics_query(
+        db,
+        model_name=model_name,
+        model_version=model_version,
+        window_start=window_start,
+        window_end=window_end,
+    )
 
-    if drift_detected is not None:
-        query = query.filter(DriftMetric.drift_detected.is_(drift_detected))
-
-    if window_start is not None:
-        query = query.filter(DriftMetric.computed_at >= window_start)
-
-    if window_end is not None:
-        query = query.filter(DriftMetric.computed_at < window_end)
-
-    return query
+    return query.order_by(DriftMetric.computed_at.desc()).first()
 
 
 # =============================================================================
@@ -297,7 +533,32 @@ def create_evaluation_metric_record(
     return entity
 
 
-def build_evaluation_metrics_query(
+def list_evaluation_metrics(
+    db: Session,
+    *,
+    limit: int = 200,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    dataset_name: str | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+) -> list[EvaluationMetric]:
+    """
+    Retourne les métriques d'évaluation filtrées.
+    """
+    query = _build_evaluation_metrics_query(
+        db,
+        model_name=model_name,
+        model_version=model_version,
+        dataset_name=dataset_name,
+        window_start=window_start,
+        window_end=window_end,
+    )
+
+    return query.order_by(EvaluationMetric.computed_at.desc()).limit(limit).all()
+
+
+def get_latest_evaluation_metric(
     db: Session,
     *,
     model_name: str | None = None,
@@ -305,28 +566,20 @@ def build_evaluation_metrics_query(
     dataset_name: str | None = None,
     window_start: datetime | None = None,
     window_end: datetime | None = None,
-) -> Query:
+) -> EvaluationMetric | None:
     """
-    Construit la requête ORM pour les métriques d'évaluation.
+    Retourne la dernière métrique d'évaluation.
     """
-    query = db.query(EvaluationMetric)
+    query = _build_evaluation_metrics_query(
+        db,
+        model_name=model_name,
+        model_version=model_version,
+        dataset_name=dataset_name,
+        window_start=window_start,
+        window_end=window_end,
+    )
 
-    if model_name is not None:
-        query = query.filter(EvaluationMetric.model_name == model_name)
-
-    if model_version is not None:
-        query = query.filter(EvaluationMetric.model_version == model_version)
-
-    if dataset_name is not None:
-        query = query.filter(EvaluationMetric.dataset_name == dataset_name)
-
-    if window_start is not None:
-        query = query.filter(EvaluationMetric.computed_at >= window_start)
-
-    if window_end is not None:
-        query = query.filter(EvaluationMetric.computed_at < window_end)
-
-    return query
+    return query.order_by(EvaluationMetric.computed_at.desc()).first()
 
 
 # =============================================================================
@@ -365,7 +618,71 @@ def create_feature_store_record(
     return entity
 
 
-def build_feature_store_query(
+def create_feature_store_records(
+    db: Session,
+    *,
+    records: list[dict[str, Any]],
+    timestamp: datetime,
+) -> None:
+    """
+    Crée plusieurs enregistrements dans la table feature_store_monitoring.
+    """
+    entities = [
+        FeatureStoreMonitoring(
+            request_id=r["request_id"],
+            client_id=r.get("client_id"),
+            model_name=r["model_name"],
+            model_version=r["model_version"],
+            feature_name=r["feature_name"],
+            feature_value=r.get("feature_value"),
+            feature_type=r.get("feature_type"),
+            source_table=r.get("source_table"),
+            snapshot_timestamp=timestamp,
+        )
+        for r in records
+    ]
+
+    if entities:
+        db.add_all(entities)
+        db.flush()
+
+
+def list_feature_store_records(
+    db: Session,
+    *,
+    limit: int = 1000,
+    request_id: str | None = None,
+    client_id: int | None = None,
+    feature_name: str | None = None,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    source_table: str | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+) -> list[FeatureStoreMonitoring]:
+    """
+    Retourne une liste d'enregistrements du feature store.
+    """
+    query = _build_feature_store_query(
+        db,
+        request_id=request_id,
+        client_id=client_id,
+        feature_name=feature_name,
+        model_name=model_name,
+        model_version=model_version,
+        source_table=source_table,
+        window_start=window_start,
+        window_end=window_end,
+    )
+
+    return (
+        query.order_by(FeatureStoreMonitoring.snapshot_timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+def count_feature_store_records(
     db: Session,
     *,
     request_id: str | None = None,
@@ -373,36 +690,56 @@ def build_feature_store_query(
     feature_name: str | None = None,
     model_name: str | None = None,
     model_version: str | None = None,
+    source_table: str | None = None,
     window_start: datetime | None = None,
     window_end: datetime | None = None,
-) -> Query:
+) -> int:
     """
-    Construit la requête ORM pour le feature store de monitoring.
+    Compte les enregistrements du feature store.
     """
-    query = db.query(FeatureStoreMonitoring)
+    query = _build_feature_store_query(
+        db,
+        request_id=request_id,
+        client_id=client_id,
+        feature_name=feature_name,
+        model_name=model_name,
+        model_version=model_version,
+        source_table=source_table,
+        window_start=window_start,
+        window_end=window_end,
+    )
 
-    if request_id is not None:
-        query = query.filter(FeatureStoreMonitoring.request_id == request_id)
+    return query.count()
 
-    if client_id is not None:
-        query = query.filter(FeatureStoreMonitoring.client_id == client_id)
 
-    if feature_name is not None:
-        query = query.filter(FeatureStoreMonitoring.feature_name == feature_name)
+def get_latest_feature_store_record(
+    db: Session,
+    *,
+    request_id: str | None = None,
+    client_id: int | None = None,
+    feature_name: str | None = None,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    source_table: str | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+) -> FeatureStoreMonitoring | None:
+    """
+    Retourne l'enregistrement le plus récent du feature store.
+    """
+    query = _build_feature_store_query(
+        db,
+        request_id=request_id,
+        client_id=client_id,
+        feature_name=feature_name,
+        model_name=model_name,
+        model_version=model_version,
+        source_table=source_table,
+        window_start=window_start,
+        window_end=window_end,
+    )
 
-    if model_name is not None:
-        query = query.filter(FeatureStoreMonitoring.model_name == model_name)
-
-    if model_version is not None:
-        query = query.filter(FeatureStoreMonitoring.model_version == model_version)
-
-    if window_start is not None:
-        query = query.filter(FeatureStoreMonitoring.snapshot_timestamp >= window_start)
-
-    if window_end is not None:
-        query = query.filter(FeatureStoreMonitoring.snapshot_timestamp < window_end)
-
-    return query
+    return query.order_by(FeatureStoreMonitoring.snapshot_timestamp.desc()).first()
 
 
 # =============================================================================
@@ -454,61 +791,85 @@ def get_alert_by_id(
     return db.query(Alert).filter(Alert.id == alert_id).first()
 
 
-def build_alerts_query(
+def list_alert_records(
+    db: Session,
+    *,
+    limit: int = 50,
+    status: str | None = None,
+    severity: str | None = None,
+    alert_type: str | None = None,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    feature_name: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+) -> list[Alert]:
+    """
+    Retourne les alertes filtrées.
+    """
+    query = _build_alerts_query(
+        db,
+        status=status,
+        severity=severity,
+        alert_type=alert_type,
+        model_name=model_name,
+        model_version=model_version,
+        feature_name=feature_name,
+        created_after=created_after,
+        created_before=created_before,
+    )
+
+    return query.order_by(Alert.created_at.desc()).limit(limit).all()
+
+
+def count_alert_records(
     db: Session,
     *,
     status: str | None = None,
     severity: str | None = None,
+    alert_type: str | None = None,
     model_name: str | None = None,
     model_version: str | None = None,
-) -> Query:
+    feature_name: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+) -> int:
     """
-    Construit la requête ORM pour les alertes.
+    Compte les alertes filtrées.
     """
-    query = db.query(Alert)
+    query = _build_alerts_query(
+        db,
+        status=status,
+        severity=severity,
+        alert_type=alert_type,
+        model_name=model_name,
+        model_version=model_version,
+        feature_name=feature_name,
+        created_after=created_after,
+        created_before=created_before,
+    )
 
-    if status is not None:
-        query = query.filter(Alert.status == status)
-
-    if severity is not None:
-        query = query.filter(Alert.severity == severity)
-
-    if model_name is not None:
-        query = query.filter(Alert.model_name == model_name)
-
-    if model_version is not None:
-        query = query.filter(Alert.model_version == model_version)
-
-    return query
+    return query.count()
 
 
-# =============================================================================
-# Prediction logs
-# =============================================================================
-
-def build_prediction_logs_query(
+def update_alert_status(
     db: Session,
     *,
-    model_name: str | None = None,
-    model_version: str | None = None,
-    window_start: datetime | None = None,
-    window_end: datetime | None = None,
-) -> Query:
+    alert: Alert,
+    status: str,
+    acknowledged_at: datetime | None = None,
+    resolved_at: datetime | None = None,
+) -> Alert:
     """
-    Construit la requête ORM pour prediction_logs.
+    Met à jour le statut d'une alerte existante.
     """
-    query = db.query(PredictionLog)
+    alert.status = status
 
-    if model_name is not None:
-        query = query.filter(PredictionLog.model_name == model_name)
+    if acknowledged_at is not None:
+        alert.acknowledged_at = acknowledged_at
 
-    if model_version is not None:
-        query = query.filter(PredictionLog.model_version == model_version)
+    if resolved_at is not None:
+        alert.resolved_at = resolved_at
 
-    if window_start is not None:
-        query = query.filter(PredictionLog.prediction_timestamp >= window_start)
-
-    if window_end is not None:
-        query = query.filter(PredictionLog.prediction_timestamp < window_end)
-
-    return query
+    db.flush()
+    return alert

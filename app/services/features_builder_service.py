@@ -2,8 +2,8 @@
 Service unique de construction des features prêtes pour le modèle.
 
 Ce module centralise toute la logique utile pour produire les features
-attendues par le modèle de scoring crédit, exclusivement à partir des
-données issues de `application_test.csv`.
+attendues par le modèle de scoring crédit, exclusivement à partir de la
+source CSV configurée dans l'application.
 
 Objectif
 --------
@@ -16,7 +16,8 @@ Fournir un point d'entrée métier unique au reste de l'application afin de :
 
 Architecture actuelle
 ---------------------
-- les données source proviennent exclusivement de `application_test.csv`
+- les données source proviennent exclusivement du CSV configuré
+  côté application
 - aucune lecture de features n'est réalisée depuis PostgreSQL
 - PostgreSQL sert uniquement au logging et au monitoring
 
@@ -47,11 +48,11 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
-from app.core.schemas import MODEL_FEATURES
-
+from app.core.config import APPLICATION_CSV
+from app.core.model_features import MODEL_FEATURES
 
 # =============================================================================
-# Colonnes de base attendues depuis application_test.csv
+# Colonnes de base attendues depuis la source CSV applicative
 # =============================================================================
 
 APPLICATION_BASE_COLUMNS = [
@@ -195,39 +196,24 @@ def _debug_df(
 # Chargement des sources CSV
 # =============================================================================
 
-def load_raw_csv_sources(data_dir: Path | str) -> dict[str, pd.DataFrame]:
+def load_raw_csv_sources(csv_path: Path | str | None = None) -> dict[str, pd.DataFrame]:
     """
     Charge les sources CSV utiles au feature builder.
 
-    Dans la version actuelle, seule `application_test.csv` est nécessaire.
-
-    Parameters
-    ----------
-    data_dir : Path | str
-        Dossier contenant les CSV source.
-
-    Returns
-    -------
-    dict[str, pd.DataFrame]
-        Dictionnaire des sources chargées.
-
-    Raises
-    ------
-    FileNotFoundError
-        Si `application_test.csv` est introuvable.
+    Dans la version actuelle, une seule source applicative brute est nécessaire.
     """
-    data_dir = Path(data_dir)
-    application_test_path = data_dir / "application_test.csv"
+    resolved_csv_path = Path(csv_path) if csv_path is not None else Path(APPLICATION_CSV)
 
-    if not application_test_path.exists():
-        raise FileNotFoundError(
-            f"Fichier introuvable : {application_test_path}"
-        )
+    if not resolved_csv_path.exists():
+        raise FileNotFoundError(f"Fichier introuvable : {resolved_csv_path}")
 
-    application_test_df = pd.read_csv(application_test_path)
+    if not resolved_csv_path.is_file():
+        raise FileNotFoundError(f"Le chemin fourni n'est pas un fichier : {resolved_csv_path}")
+
+    application_df = pd.read_csv(resolved_csv_path)
 
     return {
-        "application_test": application_test_df,
+        "application": application_df,
     }
 
 
@@ -268,44 +254,30 @@ def _coalesce_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     return result
 
 
-def _extract_application_test_df(source: Any) -> pd.DataFrame:
+def _extract_application_df(source: Any) -> pd.DataFrame:
     """
-    Extrait le DataFrame `application_test` depuis une source souple.
+    Extrait le DataFrame applicatif brut depuis une source souple.
 
     Formes supportées
     -----------------
     - un DataFrame directement
-    - un dictionnaire contenant `application_test`
-    - un dictionnaire contenant `app`
-
-    Parameters
-    ----------
-    source : Any
-        Source passée au builder.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame `application_test`.
-
-    Raises
-    ------
-    ValueError
-        Si aucune source exploitable n'est trouvée.
-    TypeError
-        Si l'objet extrait n'est pas un DataFrame pandas.
+    - un dictionnaire contenant `application`
+    - compatibilité : `application_test`
+    - compatibilité : `app`
     """
     if isinstance(source, pd.DataFrame):
         return source.copy()
 
     if isinstance(source, dict):
-        if "application_test" in source:
+        if "application" in source:
+            df = source["application"]
+        elif "application_test" in source:
             df = source["application_test"]
         elif "app" in source:
             df = source["app"]
         else:
             raise ValueError(
-                "La source ne contient ni 'application_test' ni 'app'."
+                "La source ne contient ni 'application', ni 'application_test', ni 'app'."
             )
 
         if not isinstance(df, pd.DataFrame):
@@ -316,6 +288,32 @@ def _extract_application_test_df(source: Any) -> pd.DataFrame:
     raise TypeError(
         "La source doit être un DataFrame ou un dictionnaire de DataFrames."
     )
+
+
+def _resolve_application_source(
+    *,
+    raw_sources: pd.DataFrame | dict[str, pd.DataFrame] | None = None,
+    application_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    Résout la source applicative brute à utiliser.
+
+    Règles
+    ------
+    - si `application_df` est fourni, il est prioritaire
+    - sinon, on tente d'extraire depuis `raw_sources`
+    """
+    if application_df is not None:
+        if not isinstance(application_df, pd.DataFrame):
+            raise TypeError("`application_df` doit être un DataFrame pandas.")
+        return application_df.copy()
+
+    if raw_sources is None:
+        raise ValueError(
+            "Aucune source fournie. Passe `raw_sources` ou `application_df`."
+        )
+
+    return _extract_application_df(raw_sources)
 
 
 def _validate_feature_alignment(df: pd.DataFrame, *, debug: bool = False) -> None:
@@ -418,9 +416,6 @@ def _enrich_features(df: pd.DataFrame) -> pd.DataFrame:
     ]
     f = _ensure_columns(f, required_for_enrichment)
 
-    # -------------------------------------------------------------------------
-    # Variables temporelles
-    # -------------------------------------------------------------------------
     f["AGE_YEARS"] = -1.0 * f["DAYS_BIRTH"] / 365.25
 
     f["EMPLOYED_YEARS"] = np.where(
@@ -438,9 +433,6 @@ def _enrich_features(df: pd.DataFrame) -> pd.DataFrame:
         -1.0 * f["DAYS_LAST_PHONE_CHANGE"] / 365.25,
     )
 
-    # -------------------------------------------------------------------------
-    # Flags de valeurs manquantes
-    # -------------------------------------------------------------------------
     f["DAYS_EMPLOYED__isna"] = (
         (f["DAYS_EMPLOYED"].isna()) | (f["DAYS_EMPLOYED"] == 365243)
     ).astype(int)
@@ -456,9 +448,6 @@ def _enrich_features(df: pd.DataFrame) -> pd.DataFrame:
     f["AMT_REQ_CREDIT_BUREAU_QRT__isna"] = f["AMT_REQ_CREDIT_BUREAU_QRT"].isna().astype(int)
     f["AMT_REQ_CREDIT_BUREAU_YEAR__isna"] = f["AMT_REQ_CREDIT_BUREAU_YEAR"].isna().astype(int)
 
-    # -------------------------------------------------------------------------
-    # Ratios financiers
-    # -------------------------------------------------------------------------
     f["CREDIT_INCOME_RATIO"] = _coalesce_divide(f["AMT_CREDIT"], f["AMT_INCOME_TOTAL"])
     f["ANNUITY_INCOME_RATIO"] = _coalesce_divide(f["AMT_ANNUITY"], f["AMT_INCOME_TOTAL"])
     f["ANNUITY_CREDIT_RATIO"] = _coalesce_divide(f["AMT_ANNUITY"], f["AMT_CREDIT"])
@@ -466,17 +455,11 @@ def _enrich_features(df: pd.DataFrame) -> pd.DataFrame:
 
     f["OVER_INDEBTED_40"] = (f["ANNUITY_INCOME_RATIO"] > 0.40).astype(int)
 
-    # -------------------------------------------------------------------------
-    # Transformations log
-    # -------------------------------------------------------------------------
     f["LOG_INCOME"] = np.log(np.maximum(f["AMT_INCOME_TOTAL"].fillna(0), 0) + 1)
     f["LOG_CREDIT"] = np.log(np.maximum(f["AMT_CREDIT"].fillna(0), 0) + 1)
     f["LOG_ANNUITY"] = np.log(np.maximum(f["AMT_ANNUITY"].fillna(0), 0) + 1)
     f["LOG_GOODS"] = np.log(np.maximum(f["AMT_GOODS_PRICE"].fillna(0), 0) + 1)
 
-    # -------------------------------------------------------------------------
-    # Ratios sociaux
-    # -------------------------------------------------------------------------
     f["SOCIAL_DEFAULT_RATIO_30"] = _coalesce_divide(
         f["DEF_30_CNT_SOCIAL_CIRCLE"],
         f["OBS_30_CNT_SOCIAL_CIRCLE"] + 1,
@@ -486,9 +469,6 @@ def _enrich_features(df: pd.DataFrame) -> pd.DataFrame:
         f["OBS_60_CNT_SOCIAL_CIRCLE"] + 1,
     )
 
-    # -------------------------------------------------------------------------
-    # Compteurs documentaires / contacts / incohérences adresse
-    # -------------------------------------------------------------------------
     doc_cols = [
         "FLAG_DOCUMENT_2",
         "FLAG_DOCUMENT_3",
@@ -530,9 +510,6 @@ def _enrich_features(df: pd.DataFrame) -> pd.DataFrame:
         ]
     ].fillna(0).sum(axis=1)
 
-    # -------------------------------------------------------------------------
-    # Statistiques EXT_SOURCE
-    # -------------------------------------------------------------------------
     ext_cols = ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"]
     f = _ensure_columns(f, ext_cols)
     ext_df = f[ext_cols]
@@ -543,9 +520,6 @@ def _enrich_features(df: pd.DataFrame) -> pd.DataFrame:
     f["EXT_SOURCES_STD"] = ext_df.std(axis=1, ddof=0)
     f["EXT_SOURCES_RANGE"] = f["EXT_SOURCES_MAX"] - f["EXT_SOURCES_MIN"]
 
-    # -------------------------------------------------------------------------
-    # Interactions EXT_SOURCE
-    # -------------------------------------------------------------------------
     f["EXT_INT__EXT_SOURCE_1_x_EXT_SOURCE_2"] = f["EXT_SOURCE_1"] * f["EXT_SOURCE_2"]
     f["EXT_INT__EXT_SOURCE_1_x_EXT_SOURCE_3"] = f["EXT_SOURCE_1"] * f["EXT_SOURCE_3"]
     f["EXT_INT__EXT_SOURCE_2_x_EXT_SOURCE_3"] = f["EXT_SOURCE_2"] * f["EXT_SOURCE_3"]
@@ -562,8 +536,9 @@ def _enrich_features(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def build_features_from_loaded_data(
-    raw_sources: pd.DataFrame | dict[str, pd.DataFrame],
+    raw_sources: pd.DataFrame | dict[str, pd.DataFrame] | None = None,
     *,
+    application_df: pd.DataFrame | None = None,
     client_ids: Sequence[int] | None = None,
     debug: bool = False,
     keep_id: bool = False,
@@ -573,50 +548,42 @@ def build_features_from_loaded_data(
 
     Parameters
     ----------
-    raw_sources : pd.DataFrame | dict[str, pd.DataFrame]
-        Soit directement `application_test`, soit un dictionnaire contenant
-        `application_test`.
+    raw_sources : pd.DataFrame | dict[str, pd.DataFrame] | None
+        Soit directement la source applicative brute, soit un dictionnaire
+        contenant `application`.
+    application_df : pd.DataFrame | None, default=None
+        DataFrame source fourni explicitement.
     client_ids : Sequence[int] | None, default=None
         Liste optionnelle de clients à reconstruire.
     debug : bool, default=False
         Active l'affichage détaillé des étapes.
     keep_id : bool, default=False
         Si True, conserve `SK_ID_CURR` dans la sortie.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame final aligné sur les features du modèle.
-
-    Raises
-    ------
-    ValueError
-        Si aucun client demandé n'est trouvé.
     """
     normalized_client_ids = _normalize_client_ids(client_ids)
 
     if debug:
         _debug_title("CONSTRUCTION DES FEATURES DEPUIS LES SOURCES CHARGÉES")
 
-    app = _extract_application_test_df(raw_sources)
+    app = _resolve_application_source(
+        raw_sources=raw_sources,
+        application_df=application_df,
+    )
 
     if normalized_client_ids is not None:
         if "SK_ID_CURR" not in app.columns:
-            raise ValueError("Colonne SK_ID_CURR absente de application_test.")
+            raise ValueError("Colonne SK_ID_CURR absente de la source applicative.")
 
         app = app[app["SK_ID_CURR"].isin(normalized_client_ids)].copy()
 
         if app.empty:
             raise ValueError(
-                f"Aucun client trouvé dans application_test pour client_ids={normalized_client_ids}"
+                f"Aucun client trouvé dans la source applicative pour client_ids={normalized_client_ids}"
             )
 
     if debug:
-        _debug_df(app, "application_test_source", preview_rows=3)
+        _debug_df(app, "application_source", preview_rows=3)
 
-    # -------------------------------------------------------------------------
-    # Base client
-    # -------------------------------------------------------------------------
     app = _ensure_columns(app, APPLICATION_BASE_COLUMNS)
     features = app[APPLICATION_BASE_COLUMNS].copy()
 
@@ -624,9 +591,6 @@ def build_features_from_loaded_data(
         _debug_title("BASE CLIENT")
         _debug_df(features, "features_base", preview_rows=3)
 
-    # -------------------------------------------------------------------------
-    # Enrichissement + alignement
-    # -------------------------------------------------------------------------
     features = _enrich_features(features)
     features = _align_model_features(
         features,
@@ -668,7 +632,7 @@ def build_model_ready_features(
 
     if debug:
         _debug_title("DÉMARRAGE FEATURE BUILDER")
-        print("[DEBUG] source de données : application_test.csv")
+        print(f"[DEBUG] source de données configurée : {APPLICATION_CSV}")
         print(f"[DEBUG] keep_id : {keep_id}")
         print(
             "[DEBUG] client_ids fournis : "

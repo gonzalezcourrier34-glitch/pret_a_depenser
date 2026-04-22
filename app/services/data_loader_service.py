@@ -3,41 +3,40 @@ Service de chargement et de mise en cache des données source et des features pr
 
 Objectif
 --------
-- charger une seule fois les CSV bruts
+- charger une seule fois le CSV brut source configuré
 - construire une seule fois les features enrichies
 - servir les données en mémoire pour les prédictions unitaires ou batch
 
 Architecture
 ------------
-CSV -> RAW_DATA_CACHE -> FEATURES_READY_CACHE -> API
+CSV source unique -> RAW_DATA_CACHE -> FEATURES_READY_CACHE -> API
 
 Notes
 -----
 - ce service est utile quand l'API fonctionne en mode CSV / mémoire
 - il évite de relire les fichiers et de recalculer les features à chaque requête
 - il repose sur un cache global simple, suffisant pour ce projet
+- le fichier chargé est piloté par la configuration `APPLICATION_CSV`
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict
+from typing import Any
 
 import pandas as pd
 
-from app.core.config import DATA_DIR
-from app.services.feature_builder_service import (
-    build_features_from_loaded_data,
-    load_raw_csv_sources,
-)
+from app.core.config import APPLICATION_CSV
+from app.services.features_builder_service import build_features_from_loaded_data
 
 
 # =============================================================================
 # Caches globaux
 # =============================================================================
 
-RAW_DATA_CACHE: Dict[str, pd.DataFrame] = {}
+RAW_DATA_CACHE: dict[str, pd.DataFrame] = {}
 FEATURES_READY_CACHE: pd.DataFrame | None = None
+MONITORING_REFERENCE_CACHE: dict[str, Any] = {}
 
 
 # =============================================================================
@@ -47,18 +46,6 @@ FEATURES_READY_CACHE: pd.DataFrame | None = None
 def _validate_dataframe(df: pd.DataFrame | None, name: str) -> None:
     """
     Vérifie qu'un DataFrame est bien exploitable.
-
-    Parameters
-    ----------
-    df : pd.DataFrame | None
-        DataFrame à valider.
-    name : str
-        Nom logique du DataFrame pour le message d'erreur.
-
-    Raises
-    ------
-    RuntimeError
-        Si le DataFrame est absent, vide ou invalide.
     """
     if df is None:
         raise RuntimeError(f"Le DataFrame `{name}` est None.")
@@ -73,33 +60,31 @@ def _validate_dataframe(df: pd.DataFrame | None, name: str) -> None:
 def _ensure_sk_id_curr(df: pd.DataFrame) -> None:
     """
     Vérifie la présence de la colonne SK_ID_CURR.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame à contrôler.
-
-    Raises
-    ------
-    ValueError
-        Si la colonne SK_ID_CURR est absente.
     """
     if "SK_ID_CURR" not in df.columns:
         raise ValueError("Colonne `SK_ID_CURR` absente du DataFrame.")
+
+
+def _resolve_application_csv(csv_path: Path | str | None = None) -> Path:
+    """
+    Résout le chemin du CSV source principal.
+    """
+    return Path(csv_path) if csv_path is not None else Path(APPLICATION_CSV)
 
 
 # =============================================================================
 # Chargement des données brutes
 # =============================================================================
 
-def load_all_csv(data_dir: Path | str) -> dict[str, pd.DataFrame]:
+def load_all_csv(csv_path: Path | str | None = None) -> dict[str, pd.DataFrame]:
     """
-    Charge tous les CSV bruts du projet en mémoire.
+    Charge uniquement le CSV source principal en mémoire.
 
     Parameters
     ----------
-    data_dir : Path | str
-        Dossier contenant les fichiers CSV source.
+    csv_path : Path | str | None
+        Chemin du fichier CSV source à charger.
+        Si None, utilise la configuration APPLICATION_CSV.
 
     Returns
     -------
@@ -109,27 +94,29 @@ def load_all_csv(data_dir: Path | str) -> dict[str, pd.DataFrame]:
     Raises
     ------
     FileNotFoundError
-        Si le dossier de données est introuvable.
+        Si le fichier CSV est introuvable.
     """
-    data_dir = Path(data_dir)
+    resolved_csv_path = _resolve_application_csv(csv_path)
 
-    if not data_dir.exists():
-        raise FileNotFoundError(f"Le dossier data est introuvable : {data_dir}")
+    if not resolved_csv_path.exists():
+        raise FileNotFoundError(
+            f"Le fichier CSV source est introuvable : {resolved_csv_path}"
+        )
 
-    if not data_dir.is_dir():
-        raise FileNotFoundError(f"Le chemin fourni n'est pas un dossier : {data_dir}")
+    if not resolved_csv_path.is_file():
+        raise FileNotFoundError(
+            f"Le chemin fourni n'est pas un fichier CSV : {resolved_csv_path}"
+        )
 
-    return load_raw_csv_sources(data_dir)
+    df = pd.read_csv(resolved_csv_path)
+    _validate_dataframe(df, "application_source")
+
+    return {"application": df}
 
 
-def init_raw_data_cache(data_dir: Path | str) -> None:
+def init_raw_data_cache(csv_path: Path | str | None = None) -> None:
     """
-    Initialise le cache des CSV bruts.
-
-    Parameters
-    ----------
-    data_dir : Path | str
-        Dossier contenant les fichiers CSV source.
+    Initialise le cache du CSV brut source.
     """
     global RAW_DATA_CACHE
 
@@ -137,31 +124,23 @@ def init_raw_data_cache(data_dir: Path | str) -> None:
         print("[DATA] RAW_DATA_CACHE déjà initialisé -> skip")
         return
 
-    print("[DATA] Chargement des CSV bruts en mémoire...")
-    RAW_DATA_CACHE = load_all_csv(data_dir)
+    resolved_csv_path = _resolve_application_csv(csv_path)
+
+    print(f"[DATA] Chargement du CSV brut source en mémoire : {resolved_csv_path}")
+    RAW_DATA_CACHE = load_all_csv(resolved_csv_path)
 
     if not RAW_DATA_CACHE:
         raise RuntimeError("Aucune source brute n'a été chargée.")
 
-    print("[DATA] CSV bruts chargés :")
+    print("[DATA] CSV brut chargé :")
     for name, df in RAW_DATA_CACHE.items():
         shape = df.shape if isinstance(df, pd.DataFrame) else ("?", "?")
         print(f"   - {name:<25} shape={shape}")
 
 
-def get_raw_data_cache() -> Dict[str, pd.DataFrame]:
+def get_raw_data_cache() -> dict[str, pd.DataFrame]:
     """
     Retourne le cache des données brutes.
-
-    Returns
-    -------
-    Dict[str, pd.DataFrame]
-        Dictionnaire des tables brutes chargées en mémoire.
-
-    Raises
-    ------
-    RuntimeError
-        Si le cache n'est pas encore initialisé.
     """
     if not RAW_DATA_CACHE:
         raise RuntimeError(
@@ -172,14 +151,9 @@ def get_raw_data_cache() -> Dict[str, pd.DataFrame]:
     return RAW_DATA_CACHE
 
 
-def get_data_cache() -> Dict[str, pd.DataFrame]:
+def get_data_cache() -> dict[str, pd.DataFrame]:
     """
     Alias de compatibilité pour l'ancien nom `get_data_cache`.
-
-    Returns
-    -------
-    Dict[str, pd.DataFrame]
-        Cache des données brutes.
     """
     return get_raw_data_cache()
 
@@ -195,18 +169,6 @@ def init_features_ready_cache(
 ) -> None:
     """
     Construit les features enrichies une seule fois et les garde en mémoire.
-
-    Parameters
-    ----------
-    keep_id : bool, default=True
-        Conserve ou non la colonne SK_ID_CURR dans le DataFrame final.
-    debug : bool, default=False
-        Active éventuellement les logs détaillés côté feature builder.
-
-    Raises
-    ------
-    RuntimeError
-        Si le DataFrame enrichi produit est vide ou invalide.
     """
     global FEATURES_READY_CACHE
 
@@ -226,10 +188,7 @@ def init_features_ready_cache(
 
     _validate_dataframe(FEATURES_READY_CACHE, "FEATURES_READY_CACHE")
 
-    print(
-        "[DATA] Features prêtes OK "
-        f"(shape={FEATURES_READY_CACHE.shape})"
-    )
+    print(f"[DATA] Features prêtes OK (shape={FEATURES_READY_CACHE.shape})")
 
     if keep_id:
         _ensure_sk_id_curr(FEATURES_READY_CACHE)
@@ -238,16 +197,6 @@ def init_features_ready_cache(
 def get_features_ready_cache() -> pd.DataFrame:
     """
     Retourne le DataFrame enrichi mis en cache.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame complet des features prêtes.
-
-    Raises
-    ------
-    RuntimeError
-        Si le cache des features n'est pas initialisé.
     """
     if FEATURES_READY_CACHE is None:
         raise RuntimeError(
@@ -269,29 +218,11 @@ def get_features_for_client_from_cache(
 ) -> pd.DataFrame:
     """
     Retourne les features d'un seul client depuis le cache.
-
-    Parameters
-    ----------
-    client_id : int
-        Identifiant client SK_ID_CURR.
-    keep_id : bool, default=False
-        Conserve ou non la colonne SK_ID_CURR dans le résultat.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame d'une seule ligne correspondant au client demandé.
-
-    Raises
-    ------
-    ValueError
-        Si le client est introuvable, dupliqué, ou si la clé est absente.
     """
     df = get_features_ready_cache()
     _ensure_sk_id_curr(df)
 
     client_id = int(client_id)
-
     client_df = df.loc[df["SK_ID_CURR"] == client_id].copy()
 
     if client_df.empty:
@@ -314,31 +245,11 @@ def get_features_for_clients_from_cache(
 ) -> pd.DataFrame:
     """
     Retourne les features de plusieurs clients depuis le cache.
-
-    Parameters
-    ----------
-    client_ids : list[int]
-        Liste des identifiants clients à récupérer.
-    keep_id : bool, default=True
-        Conserve ou non la colonne SK_ID_CURR.
-    strict : bool, default=False
-        Si True, lève une erreur si un ou plusieurs clients sont absents.
-
-    Returns
-    -------
-    pd.DataFrame
-        Sous-ensemble du cache contenant les clients trouvés.
-
-    Raises
-    ------
-    ValueError
-        Si aucun client n'est trouvé, ou si strict=True et qu'il manque des IDs.
     """
     df = get_features_ready_cache()
     _ensure_sk_id_curr(df)
 
     ids = [int(x) for x in client_ids]
-
     subset = df.loc[df["SK_ID_CURR"].isin(ids)].copy()
 
     if subset.empty:
@@ -366,18 +277,18 @@ def get_features_for_clients_from_cache(
 # =============================================================================
 
 def init_full_data_cache(
-    data_dir: Path | str | None = None,
+    csv_path: Path | str | None = None,
     *,
     debug: bool = False,
 ) -> None:
     """
     Initialise l'ensemble du cache nécessaire au mode CSV optimisé.
     """
-    resolved_data_dir = Path(data_dir) if data_dir is not None else Path(DATA_DIR)
+    resolved_csv_path = _resolve_application_csv(csv_path)
 
-    print(f"[DATA] Initialisation complète du cache depuis : {resolved_data_dir}")
+    print(f"[DATA] Initialisation complète du cache depuis : {resolved_csv_path}")
 
-    init_raw_data_cache(resolved_data_dir)
+    init_raw_data_cache(resolved_csv_path)
     init_features_ready_cache(keep_id=True, debug=debug)
 
     print("[DATA] Initialisation complète terminée.")
@@ -386,10 +297,6 @@ def init_full_data_cache(
 def reset_data_cache() -> None:
     """
     Réinitialise complètement les caches globaux.
-
-    Notes
-    -----
-    Utiliser uniquement pour les tests ou pour forcer un rechargement.
     """
     global RAW_DATA_CACHE, FEATURES_READY_CACHE
 
@@ -397,3 +304,195 @@ def reset_data_cache() -> None:
     FEATURES_READY_CACHE = None
 
     print("[DATA] Cache reset effectué.")
+
+
+# =============================================================================
+# Monitoring Evidently - références parquet / json
+# =============================================================================
+
+def _resolve_monitoring_dir(monitoring_dir: Path | str | None = None) -> Path:
+    """
+    Résout le répertoire de monitoring.
+    """
+    if monitoring_dir is not None:
+        return Path(monitoring_dir)
+
+    return Path("monitoring")
+
+
+def _load_parquet_file(file_path: Path, logical_name: str) -> pd.DataFrame:
+    """
+    Charge un fichier parquet et vérifie qu'il est exploitable.
+    """
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Fichier introuvable pour `{logical_name}` : {file_path}"
+        )
+
+    df = pd.read_parquet(file_path)
+    _validate_dataframe(df, logical_name)
+    return df
+
+
+def _load_json_file(file_path: Path, logical_name: str) -> Any:
+    """
+    Charge un fichier JSON.
+    """
+    import json
+
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Fichier introuvable pour `{logical_name}` : {file_path}"
+        )
+
+    with file_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def init_monitoring_reference_cache(
+    monitoring_dir: Path | str | None = None,
+) -> None:
+    """
+    Initialise le cache des fichiers de référence du monitoring.
+    """
+    global MONITORING_REFERENCE_CACHE
+
+    if MONITORING_REFERENCE_CACHE:
+        print("[DATA][MONITORING] MONITORING_REFERENCE_CACHE déjà initialisé -> skip")
+        return
+
+    base_dir = _resolve_monitoring_dir(monitoring_dir)
+
+    if not base_dir.exists():
+        raise FileNotFoundError(f"Dossier monitoring introuvable : {base_dir}")
+
+    print(f"[DATA][MONITORING] Chargement des références monitoring depuis : {base_dir}")
+
+    cache: dict[str, Any] = {}
+
+    raw_path = base_dir / "reference_features_raw.parquet"
+    transformed_path = base_dir / "reference_features_transformed.parquet"
+
+    cache["reference_features_raw"] = _load_parquet_file(
+        raw_path,
+        "reference_features_raw",
+    )
+    cache["reference_features_transformed"] = _load_parquet_file(
+        transformed_path,
+        "reference_features_transformed",
+    )
+
+    optional_parquets = {
+        "reference_target": base_dir / "reference_target.parquet",
+    }
+
+    for key, path in optional_parquets.items():
+        if path.exists():
+            cache[key] = pd.read_parquet(path)
+            print(f"[DATA][MONITORING] {key:<35} loaded shape={cache[key].shape}")
+
+    optional_jsons = {
+        "input_feature_names": base_dir / "input_feature_names.json",
+        "transformed_feature_names": base_dir / "transformed_feature_names.json",
+        "reference_metadata": base_dir / "reference_metadata.json",
+        "reference_stats_raw": base_dir / "reference_stats_raw.json",
+        "reference_stats_transformed": base_dir / "reference_stats_transformed.json",
+    }
+
+    for key, path in optional_jsons.items():
+        if path.exists():
+            cache[key] = _load_json_file(path, key)
+            print(f"[DATA][MONITORING] {key:<35} loaded")
+
+    MONITORING_REFERENCE_CACHE = cache
+
+    print("[DATA][MONITORING] Références monitoring chargées :")
+    for key, value in MONITORING_REFERENCE_CACHE.items():
+        if isinstance(value, pd.DataFrame):
+            print(f"   - {key:<35} shape={value.shape}")
+        else:
+            print(f"   - {key:<35} type={type(value).__name__}")
+
+
+def get_monitoring_reference_cache() -> dict[str, Any]:
+    """
+    Retourne le cache des références monitoring.
+    """
+    if not MONITORING_REFERENCE_CACHE:
+        raise RuntimeError(
+            "MONITORING_REFERENCE_CACHE non initialisé. "
+            "Appelle `init_monitoring_reference_cache()`."
+        )
+
+    return MONITORING_REFERENCE_CACHE
+
+
+def get_reference_features_raw_df() -> pd.DataFrame:
+    """
+    Retourne le DataFrame de référence brut pour Evidently.
+    """
+    cache = get_monitoring_reference_cache()
+    df = cache.get("reference_features_raw")
+    _validate_dataframe(df, "reference_features_raw")
+    return df.copy()
+
+
+def get_reference_features_transformed_df() -> pd.DataFrame:
+    """
+    Retourne le DataFrame de référence transformé pour Evidently.
+    """
+    cache = get_monitoring_reference_cache()
+    df = cache.get("reference_features_transformed")
+    _validate_dataframe(df, "reference_features_transformed")
+    return df.copy()
+
+
+def get_reference_target_df() -> pd.DataFrame | None:
+    """
+    Retourne le DataFrame target de référence si disponible.
+    """
+    cache = get_monitoring_reference_cache()
+    df = cache.get("reference_target")
+
+    if df is None:
+        return None
+
+    if not isinstance(df, pd.DataFrame):
+        return None
+
+    return df.copy()
+
+
+def get_input_feature_names() -> list[str]:
+    """
+    Retourne la liste des features d'entrée si disponible.
+    """
+    cache = get_monitoring_reference_cache()
+    value = cache.get("input_feature_names", [])
+
+    if isinstance(value, list):
+        return [str(x) for x in value]
+
+    return []
+
+
+def get_transformed_feature_names() -> list[str]:
+    """
+    Retourne la liste des features transformées si disponible.
+    """
+    cache = get_monitoring_reference_cache()
+    value = cache.get("transformed_feature_names", [])
+
+    if isinstance(value, list):
+        return [str(x) for x in value]
+
+    return []
+
+
+def reset_monitoring_reference_cache() -> None:
+    """
+    Réinitialise le cache des références monitoring.
+    """
+    global MONITORING_REFERENCE_CACHE
+    MONITORING_REFERENCE_CACHE = {}
+    print("[DATA][MONITORING] Cache monitoring reset effectué.")

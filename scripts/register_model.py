@@ -35,6 +35,7 @@ Variables d'environnement supportées
 - MODEL_METRICS_PATH
 - MODEL_HYPERPARAMETERS_PATH
 """
+
 from __future__ import annotations
 
 import json
@@ -44,6 +45,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
@@ -51,9 +54,19 @@ if str(BASE_DIR) not in sys.path:
 from app.core.db import SessionLocal
 from app.services.monitoring_service import MonitoringService
 
+
+# =============================================================================
+# Chargement de l'environnement
+# =============================================================================
+
+load_dotenv()
+
+
 # =============================================================================
 # Configuration
 # =============================================================================
+
+ALLOWED_MODEL_STAGES = {"dev", "staging", "production", "archived"}
 
 MODEL_NAME = os.getenv("MODEL_NAME", "credit_scoring_model")
 MODEL_VERSION = os.getenv("MODEL_VERSION", "v1")
@@ -92,6 +105,16 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _resolve_path(path_str: str) -> Path:
+    """
+    Résout un chemin absolu ou relatif au projet.
+    """
+    path = Path(path_str)
+    if path.is_absolute():
+        return path
+    return BASE_DIR / path
+
+
 def _read_json_file(path_str: str) -> Any | None:
     """
     Lit un fichier JSON s'il existe.
@@ -106,13 +129,13 @@ def _read_json_file(path_str: str) -> Any | None:
     Any | None
         Contenu JSON ou None si absent/invalide.
     """
-    path = Path(path_str)
+    path = _resolve_path(path_str)
 
     if not path.exists():
         return None
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as exc:
         print(f"[WARNING] Impossible de lire {path}: {exc}")
@@ -206,10 +229,32 @@ def _validate_required_files() -> None:
     FileNotFoundError
         Si le fichier modèle principal est absent.
     """
-    model_path = Path(MODEL_PATH)
+    model_path = _resolve_path(MODEL_PATH)
 
     if not model_path.exists():
         raise FileNotFoundError(f"Artefact modèle introuvable: {model_path}")
+
+
+def _validate_configuration() -> None:
+    """
+    Vérifie la cohérence minimale de la configuration.
+
+    Raises
+    ------
+    ValueError
+        Si une variable essentielle est invalide.
+    """
+    if MODEL_STAGE not in ALLOWED_MODEL_STAGES:
+        raise ValueError(
+            f"MODEL_STAGE invalide: {MODEL_STAGE}. "
+            f"Valeurs autorisées: {sorted(ALLOWED_MODEL_STAGES)}"
+        )
+
+    if not MODEL_NAME.strip():
+        raise ValueError("MODEL_NAME est vide.")
+
+    if not MODEL_VERSION.strip():
+        raise ValueError("MODEL_VERSION est vide.")
 
 
 # =============================================================================
@@ -224,6 +269,7 @@ def main() -> None:
     print("ENREGISTREMENT DU MODÈLE DÉPLOYÉ")
     print("=" * 80)
 
+    _validate_configuration()
     _validate_required_files()
 
     feature_list = _load_feature_list()
@@ -233,7 +279,7 @@ def main() -> None:
     print(f"MODEL_NAME              : {MODEL_NAME}")
     print(f"MODEL_VERSION           : {MODEL_VERSION}")
     print(f"MODEL_STAGE             : {MODEL_STAGE}")
-    print(f"MODEL_PATH              : {MODEL_PATH}")
+    print(f"MODEL_PATH              : {_resolve_path(MODEL_PATH)}")
     print(f"MODEL_SOURCE_PATH       : {MODEL_SOURCE_PATH}")
     print(f"TRAINING_DATA_VERSION   : {TRAINING_DATA_VERSION}")
     print(f"MODEL_RUN_ID            : {MODEL_RUN_ID}")

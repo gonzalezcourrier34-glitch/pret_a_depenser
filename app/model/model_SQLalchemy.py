@@ -25,8 +25,8 @@ Architecture
 ------------
 Dans la version actuelle du projet :
 - les features sont construites directement depuis les CSV
-- PostgreSQL sert uniquement à stocker les logs de prédiction
-  et les données de monitoring
+- PostgreSQL sert à stocker les données de traçabilité des prédictions
+  et les données de monitoring du modèle
 
 Notes
 -----

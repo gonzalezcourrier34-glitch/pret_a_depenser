@@ -204,6 +204,28 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _safe_bool(value: Any) -> bool:
+    """
+    Convertit une valeur en booléen de façon robuste.
+    """
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "oui"}
+
+    try:
+        return bool(value)
+    except Exception:
+        return False
+
+
 def _pick_latest_row(
     df: pd.DataFrame,
     date_cols: list[str],
@@ -241,6 +263,7 @@ def _choose_existing_columns(df: pd.DataFrame, preferred_cols: list[str]) -> lis
 def render_monitoring_page(
     *,
     monitoring_summary: dict,
+    monitoring_health: dict,
     prediction_logs_df: pd.DataFrame,
     model_registry_df: pd.DataFrame,
     active_model_df: pd.DataFrame,
@@ -252,29 +275,10 @@ def render_monitoring_page(
 ) -> None:
     """
     Affiche la page de monitoring du modèle.
-
-    Parameters
-    ----------
-    monitoring_summary : dict
-        Résumé global renvoyé par l'API.
-    prediction_logs_df : pd.DataFrame
-        Historique des prédictions.
-    model_registry_df : pd.DataFrame
-        Registre des versions de modèles.
-    active_model_df : pd.DataFrame
-        Modèle actuellement actif.
-    evaluation_metrics_df : pd.DataFrame
-        Historique des métriques d'évaluation.
-    drift_metrics_df : pd.DataFrame
-        Historique des métriques de drift.
-    alerts_df : pd.DataFrame
-        Historique des alertes.
-    feature_store_monitoring_df : pd.DataFrame
-        Snapshots de features utilisés pour le monitoring.
-    metric_safe_number :
-        Fonction utilitaire fournie par la couche appelante.
     """
     summary = _safe_dict(monitoring_summary)
+    health = _safe_dict(monitoring_health)
+
     predictions_summary = _safe_dict(summary.get("predictions"))
     drift_summary = _safe_dict(summary.get("drift"))
     latest_eval_summary = _safe_dict(summary.get("latest_evaluation"))
@@ -331,7 +335,7 @@ def render_monitoring_page(
     )
     prediction_logs_df = _coerce_columns_to_numeric(
         prediction_logs_df,
-        ["score", "threshold_used", "latency_ms", "status_code", "prediction"],
+        ["score", "threshold", "latency_ms", "prediction"],
     )
 
     alerts_df = _coerce_columns_to_datetime(
@@ -359,7 +363,7 @@ def render_monitoring_page(
     # -------------------------------------------------------------------------
     detected_count_df = 0
     if not drift_metrics_df.empty and "drift_detected" in drift_metrics_df.columns:
-        detected_count_df = int(drift_metrics_df["drift_detected"].fillna(False).sum())
+        detected_count_df = int(drift_metrics_df["drift_detected"].apply(_safe_bool).sum())
 
     open_alerts_df = 0
     if not alerts_df.empty and "status" in alerts_df.columns:
@@ -402,6 +406,10 @@ def render_monitoring_page(
         evaluation_metrics_df,
         ["computed_at"],
     )
+
+    has_predictions = _safe_bool(health.get("has_predictions"))
+    has_drift_metrics = _safe_bool(health.get("has_drift_metrics"))
+    has_latest_evaluation = _safe_bool(health.get("has_latest_evaluation"))
 
     # -------------------------------------------------------------------------
     # Header
@@ -465,7 +473,7 @@ def render_monitoring_page(
             "Vue rapide sur la version active et la dernière évaluation connue.",
         )
 
-        row = latest_active_model_row or latest_registry_row
+        row = latest_active_model_row if latest_active_model_row is not None else latest_registry_row
 
         if row is not None:
             model_name = row.get("model_name", "N/A")
@@ -476,7 +484,7 @@ def render_monitoring_page(
 
             deployed_label = (
                 deployed_at.strftime("%Y-%m-%d %H:%M:%S")
-                if pd.notna(deployed_at)
+                if deployed_at is not None and pd.notna(deployed_at)
                 else "N/A"
             )
 
@@ -524,6 +532,10 @@ def render_monitoring_page(
             health_color = "#D97706"
             health_label = "Sous surveillance"
 
+        if not has_predictions:
+            health_label = "Peu de signal"
+            health_color = "#6B7280"
+
         st.markdown(
             f"""
             <div style="
@@ -537,6 +549,18 @@ def render_monitoring_page(
                 margin-top: 6px;
             ">
                 {health_label}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("")
+        st.markdown(
+            f"""
+            <div style="font-size: 0.9rem; color: #6B7280;">
+                Prédictions : {"Oui" if has_predictions else "Non"}<br>
+                Drift disponible : {"Oui" if has_drift_metrics else "Non"}<br>
+                Évaluation dispo : {"Oui" if has_latest_evaluation else "Non"}
             </div>
             """,
             unsafe_allow_html=True,
@@ -586,6 +610,12 @@ def render_monitoring_page(
             else:
                 st.info("Aucun résumé global disponible.")
 
+            st.markdown("#### Santé de monitoring")
+            if health:
+                st.json(health)
+            else:
+                st.info("Aucun état de santé monitoring disponible.")
+
         with col_b:
             st.markdown("#### Dernière évaluation")
             if latest_eval_row is not None:
@@ -599,10 +629,10 @@ def render_monitoring_page(
                 st.write(f"**Taille échantillon** : {_safe_int(latest_eval_row.get('sample_size'))}")
             elif latest_eval_summary:
                 st.write(f"**Dataset** : {latest_eval_summary.get('dataset_name', 'N/A')}")
-                st.write(f"**Recall** : {latest_eval_summary.get('recall_score', 'N/A')}")
-                st.write(f"**Precision** : {latest_eval_summary.get('precision_score', 'N/A')}")
-                st.write(f"**F1** : {latest_eval_summary.get('f1_score', 'N/A')}")
-                st.write(f"**Business cost** : {latest_eval_summary.get('business_cost', 'N/A')}")
+                st.write(f"**Recall** : {_safe_metric_value(latest_eval_summary.get('recall_score'))}")
+                st.write(f"**Precision** : {_safe_metric_value(latest_eval_summary.get('precision_score'))}")
+                st.write(f"**F1** : {_safe_metric_value(latest_eval_summary.get('f1_score'))}")
+                st.write(f"**Business cost** : {_safe_metric_value(latest_eval_summary.get('business_cost'), 2)}")
             else:
                 st.info("Aucune synthèse d'évaluation disponible.")
 
@@ -718,15 +748,15 @@ def render_monitoring_page(
                 l1, l2, l3 = st.columns(3)
                 l1.metric(
                     "Latence moyenne",
-                    round(metric_safe_number(latency_df, "latency_ms", "mean", 0), 2),
+                    round(_safe_float(metric_safe_number(latency_df, "latency_ms", "mean", 0), 0.0), 2),
                 )
                 l2.metric(
                     "Latence p95",
-                    round(metric_safe_number(latency_df, "latency_ms", "p95", 0), 2),
+                    round(_safe_float(metric_safe_number(latency_df, "latency_ms", "p95", 0), 0.0), 2),
                 )
                 l3.metric(
                     "Latence p99",
-                    round(metric_safe_number(latency_df, "latency_ms", "p99", 0), 2),
+                    round(_safe_float(metric_safe_number(latency_df, "latency_ms", "p99", 0), 0.0), 2),
                 )
 
             with st.expander("Voir les logs de latence"):
@@ -740,9 +770,9 @@ def render_monitoring_page(
                         "model_version",
                         "score",
                         "prediction",
-                        "threshold_used",
+                        "threshold",
                         "latency_ms",
-                        "status_code",
+                        "status",
                         "error_message",
                     ],
                 )
@@ -768,7 +798,7 @@ def render_monitoring_page(
             detected_count = 0
             if "drift_detected" in drift_metrics_df.columns:
                 detected_count = int(
-                    drift_metrics_df["drift_detected"].fillna(False).sum()
+                    drift_metrics_df["drift_detected"].apply(_safe_bool).sum()
                 )
 
             d1.metric("Lignes drift", len(drift_metrics_df))
@@ -810,12 +840,9 @@ def render_monitoring_page(
             drift_view = drift_metrics_df.copy()
 
             if only_drift and "drift_detected" in drift_view.columns:
-                drift_view = drift_view[drift_view["drift_detected"] == True]
+                drift_view = drift_view[drift_view["drift_detected"].apply(_safe_bool)]
 
-            if (
-                selected_metric_name != "Toutes"
-                and "metric_name" in drift_view.columns
-            ):
+            if selected_metric_name != "Toutes" and "metric_name" in drift_view.columns:
                 drift_view = drift_view[
                     drift_view["metric_name"].astype(str) == selected_metric_name
                 ]

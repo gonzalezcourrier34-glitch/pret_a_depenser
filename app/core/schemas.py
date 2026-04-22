@@ -1,323 +1,107 @@
 """
-Schémas Pydantic de l'application de scoring crédit.
+Schémas Pydantic centralisés de l'application.
 
-Ce module contient :
-- la liste exacte des features attendues par le modèle
-- la logique de génération dynamique du schéma d'entrée modèle
-- les schémas d'entrée / sortie de l'API FastAPI
+Ce module regroupe les schémas réutilisables exposés par l'API :
+- prédiction
+- historique
+- monitoring
+- Evidently
 
 Objectif
 --------
-Garantir une cohérence stricte entre :
-- les features attendues par le pipeline ML
-- les données validées par l'API
-- les types Python exposés à FastAPI
-
-Architecture actuelle
----------------------
-- les données de prédiction sont construites exclusivement
-  à partir de `application_test.csv`
-- les features agrégées de type `bureau__...` et `prev__...`
-  ne sont plus utilisées
-- la base PostgreSQL sert uniquement au logging et au monitoring
+Centraliser les schémas HTTP pour éviter les doublons entre routes
+et garder une seule source de vérité pour la validation / sérialisation.
 
 Notes
 -----
-- Certains noms de colonnes contiennent des caractères peu pratiques
-  pour Python, notamment des doubles underscores.
-- On génère donc un schéma dynamique avec :
-  - des noms de champs Python "safe"
-  - des alias correspondant aux vrais noms des features modèle
-- Le payload API utilise un wrapper `PredictRequest` avec :
-  - `SK_ID_CURR` optionnel
-  - `features` contenant toutes les variables du modèle
+- Ces schémas sont pensés pour être réutilisés dans plusieurs routes.
+- Ils reflètent les structures effectivement renvoyées
+  par les services métier.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Type, cast
+from datetime import datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, create_model
-
-
-# =============================================================================
-# Liste exacte des features attendues par le modèle
-# =============================================================================
-
-MODEL_FEATURES = [
-    "NAME_CONTRACT_TYPE",
-    "CODE_GENDER",
-    "FLAG_OWN_CAR",
-    "FLAG_OWN_REALTY",
-    "CNT_CHILDREN",
-    "AMT_INCOME_TOTAL",
-    "AMT_CREDIT",
-    "AMT_ANNUITY",
-    "AMT_GOODS_PRICE",
-    "NAME_TYPE_SUITE",
-    "NAME_INCOME_TYPE",
-    "NAME_EDUCATION_TYPE",
-    "NAME_FAMILY_STATUS",
-    "NAME_HOUSING_TYPE",
-    "REGION_POPULATION_RELATIVE",
-    "DAYS_BIRTH",
-    "DAYS_EMPLOYED",
-    "DAYS_REGISTRATION",
-    "DAYS_ID_PUBLISH",
-    "OWN_CAR_AGE",
-    "FLAG_EMP_PHONE",
-    "FLAG_WORK_PHONE",
-    "FLAG_PHONE",
-    "FLAG_EMAIL",
-    "OCCUPATION_TYPE",
-    "CNT_FAM_MEMBERS",
-    "REGION_RATING_CLIENT",
-    "REGION_RATING_CLIENT_W_CITY",
-    "WEEKDAY_APPR_PROCESS_START",
-    "HOUR_APPR_PROCESS_START",
-    "REG_REGION_NOT_LIVE_REGION",
-    "REG_REGION_NOT_WORK_REGION",
-    "LIVE_REGION_NOT_WORK_REGION",
-    "REG_CITY_NOT_LIVE_CITY",
-    "REG_CITY_NOT_WORK_CITY",
-    "LIVE_CITY_NOT_WORK_CITY",
-    "EXT_SOURCE_1",
-    "EXT_SOURCE_2",
-    "EXT_SOURCE_3",
-    "APARTMENTS_AVG",
-    "BASEMENTAREA_AVG",
-    "YEARS_BEGINEXPLUATATION_AVG",
-    "ELEVATORS_AVG",
-    "ENTRANCES_AVG",
-    "FLOORSMAX_AVG",
-    "LANDAREA_AVG",
-    "LIVINGAREA_AVG",
-    "NONLIVINGAREA_AVG",
-    "OBS_30_CNT_SOCIAL_CIRCLE",
-    "DEF_30_CNT_SOCIAL_CIRCLE",
-    "OBS_60_CNT_SOCIAL_CIRCLE",
-    "DEF_60_CNT_SOCIAL_CIRCLE",
-    "DAYS_LAST_PHONE_CHANGE",
-    "AMT_REQ_CREDIT_BUREAU_HOUR",
-    "AMT_REQ_CREDIT_BUREAU_WEEK",
-    "AMT_REQ_CREDIT_BUREAU_MON",
-    "AMT_REQ_CREDIT_BUREAU_QRT",
-    "AMT_REQ_CREDIT_BUREAU_YEAR",
-    "AGE_YEARS",
-    "EMPLOYED_YEARS",
-    "REGISTRATION_YEARS",
-    "ID_PUBLISH_YEARS",
-    "LAST_PHONE_CHANGE_YEARS",
-    "DAYS_EMPLOYED__isna",
-    "OWN_CAR_AGE__isna",
-    "EXT_SOURCE_1__isna",
-    "EXT_SOURCE_3__isna",
-    "DAYS_LAST_PHONE_CHANGE__isna",
-    "AMT_REQ_CREDIT_BUREAU_HOUR__isna",
-    "AMT_REQ_CREDIT_BUREAU_WEEK__isna",
-    "AMT_REQ_CREDIT_BUREAU_MON__isna",
-    "AMT_REQ_CREDIT_BUREAU_QRT__isna",
-    "AMT_REQ_CREDIT_BUREAU_YEAR__isna",
-    "CREDIT_INCOME_RATIO",
-    "ANNUITY_INCOME_RATIO",
-    "ANNUITY_CREDIT_RATIO",
-    "CREDIT_GOODS_RATIO",
-    "OVER_INDEBTED_40",
-    "LOG_INCOME",
-    "LOG_CREDIT",
-    "LOG_ANNUITY",
-    "LOG_GOODS",
-    "SOCIAL_DEFAULT_RATIO_30",
-    "SOCIAL_DEFAULT_RATIO_60",
-    "DOC_COUNT",
-    "CONTACT_COUNT",
-    "ADDRESS_MISMATCH_COUNT",
-    "EXT_SOURCES_MEAN",
-    "EXT_SOURCES_MIN",
-    "EXT_SOURCES_MAX",
-    "EXT_SOURCES_STD",
-    "EXT_SOURCES_RANGE",
-    "EXT_INT__EXT_SOURCE_1_x_EXT_SOURCE_2",
-    "EXT_INT__EXT_SOURCE_1_x_EXT_SOURCE_3",
-    "EXT_INT__EXT_SOURCE_2_x_EXT_SOURCE_3",
-    "EXT_POW2__EXT_SOURCE_1",
-    "EXT_POW2__EXT_SOURCE_2",
-    "EXT_POW2__EXT_SOURCE_3",
-]
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # =============================================================================
-# Typage métier des features
+# Base commune
 # =============================================================================
 
-CATEGORICAL_FEATURES = {
-    "NAME_CONTRACT_TYPE",
-    "CODE_GENDER",
-    "FLAG_OWN_CAR",
-    "FLAG_OWN_REALTY",
-    "NAME_TYPE_SUITE",
-    "NAME_INCOME_TYPE",
-    "NAME_EDUCATION_TYPE",
-    "NAME_FAMILY_STATUS",
-    "NAME_HOUSING_TYPE",
-    "OCCUPATION_TYPE",
-    "WEEKDAY_APPR_PROCESS_START",
-}
-
-INTEGER_FEATURES = {
-    "CNT_CHILDREN",
-    "FLAG_EMP_PHONE",
-    "FLAG_WORK_PHONE",
-    "FLAG_PHONE",
-    "FLAG_EMAIL",
-    "REGION_RATING_CLIENT",
-    "REGION_RATING_CLIENT_W_CITY",
-    "HOUR_APPR_PROCESS_START",
-    "REG_REGION_NOT_LIVE_REGION",
-    "REG_REGION_NOT_WORK_REGION",
-    "LIVE_REGION_NOT_WORK_REGION",
-    "REG_CITY_NOT_LIVE_CITY",
-    "REG_CITY_NOT_WORK_CITY",
-    "LIVE_CITY_NOT_WORK_CITY",
-    "DAYS_EMPLOYED__isna",
-    "OWN_CAR_AGE__isna",
-    "EXT_SOURCE_1__isna",
-    "EXT_SOURCE_3__isna",
-    "DAYS_LAST_PHONE_CHANGE__isna",
-    "AMT_REQ_CREDIT_BUREAU_HOUR__isna",
-    "AMT_REQ_CREDIT_BUREAU_WEEK__isna",
-    "AMT_REQ_CREDIT_BUREAU_MON__isna",
-    "AMT_REQ_CREDIT_BUREAU_QRT__isna",
-    "AMT_REQ_CREDIT_BUREAU_YEAR__isna",
-    "OVER_INDEBTED_40",
-    "DOC_COUNT",
-    "CONTACT_COUNT",
-    "ADDRESS_MISMATCH_COUNT",
-}
-
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-def to_safe_field_name(feature_name: str) -> str:
+class StrictSchema(BaseModel):
     """
-    Transforme un nom de feature SQL / modèle en nom de champ Python valide.
-
-    Parameters
-    ----------
-    feature_name : str
-        Nom d'origine de la feature.
-
-    Returns
-    -------
-    str
-        Nom de champ compatible avec Python.
-    """
-    safe_name = feature_name.lower()
-    safe_name = safe_name.replace("__", "_")
-    safe_name = safe_name.replace("-", "_")
-    safe_name = safe_name.replace("/", "_")
-    safe_name = safe_name.replace("(", "_")
-    safe_name = safe_name.replace(")", "_")
-    safe_name = safe_name.replace(" ", "_")
-
-    if safe_name and safe_name[0].isdigit():
-        safe_name = f"f_{safe_name}"
-
-    return safe_name
-
-
-def get_field_definition(feature_name: str):
-    """
-    Déduit le type Pydantic à partir du nom de feature.
-
-    Parameters
-    ----------
-    feature_name : str
-        Nom de la feature.
-
-    Returns
-    -------
-    tuple
-        Tuple de la forme (type, Field(...)) pour create_model.
-    """
-    if feature_name in CATEGORICAL_FEATURES:
-        return Optional[str], Field(default=None, alias=feature_name)
-
-    if feature_name in INTEGER_FEATURES:
-        return Optional[int], Field(default=None, alias=feature_name)
-
-    return Optional[float], Field(default=None, alias=feature_name)
-
-
-# =============================================================================
-# Schéma dynamique d'entrée modèle
-# =============================================================================
-
-class CreditModelInputBase(BaseModel):
-    """
-    Base commune pour le schéma des features d'entrée du modèle.
+    Base commune stricte pour tous les schémas de l'API.
     """
 
     model_config = ConfigDict(
-        populate_by_name=True,
         extra="forbid",
-        str_strip_whitespace=True,
+        populate_by_name=True,
+        from_attributes=True,
     )
 
 
-fields = {
-    to_safe_field_name(feature_name): get_field_definition(feature_name)
-    for feature_name in MODEL_FEATURES
-}
+# =============================================================================
+# Helpers de réponse génériques
+# =============================================================================
 
-CreditModelInput = cast(
-    Type[BaseModel],
-    create_model(
-        "CreditModelInput",
-        __base__=CreditModelInputBase,
-        **fields,
-    ),
-)
+class CountItemsResponse(StrictSchema):
+    """
+    Réponse générique minimale de type :
+    {
+        "count": int,
+        "items": [...]
+    }
+    """
+
+    count: int
+
+
+class GenericItemsResponse(CountItemsResponse):
+    """
+    Réponse générique pour les endpoints qui renvoient :
+    - count
+    - items (liste de dictionnaires)
+    """
+
+    items: list[dict[str, Any]]
+
+
+class PaginatedItemsResponse(CountItemsResponse):
+    """
+    Base générique paginée.
+    """
+
+    limit: int
+    offset: int
 
 
 # =============================================================================
-# Schémas API
+# Predict
 # =============================================================================
 
-class PredictRequest(BaseModel):
+class HealthResponse(StrictSchema):
     """
-    Schéma d'entrée de l'API de prédiction.
-
-    Attributes
-    ----------
-    SK_ID_CURR : Optional[int]
-        Identifiant client optionnel.
-    features : CreditModelInput
-        Ensemble des features attendues par le modèle.
+    Réponse du healthcheck.
     """
 
-    SK_ID_CURR: Optional[int] = None
-    features: CreditModelInput  # type: ignore
+    status: str
 
 
-class PredictResponse(BaseModel):
+class PredictRequest(StrictSchema):
     """
-    Schéma de réponse de l'API de prédiction.
+    Payload de prédiction unitaire.
+    """
 
-    Attributes
-    ----------
-    request_id : str
-        Identifiant unique de la requête de prédiction.
-    prediction : int
-        Classe prédite (0 ou 1).
-    score : float
-        Probabilité associée à la classe positive.
-    model_version : str
-        Version du modèle utilisée.
-    latency_ms : float
-        Temps d'inférence en millisecondes.
+    SK_ID_CURR: int | None = Field(default=None, description="Identifiant client")
+    features: dict[str, Any] = Field(..., description="Features prêtes pour le modèle")
+
+
+class PredictResponse(StrictSchema):
+    """
+    Réponse de prédiction unitaire.
     """
 
     request_id: str
@@ -327,60 +111,26 @@ class PredictResponse(BaseModel):
     latency_ms: float
 
 
-class PredictBatchItemResponse(BaseModel):
+class PredictBatchItemResponse(StrictSchema):
     """
-    Schéma de réponse pour un élément d'un batch de prédictions.
-
-    Attributes
-    ----------
-    request_id : str
-        Identifiant unique de la requête.
-    client_id : Optional[int]
-        Identifiant client éventuel.
-    prediction : Optional[int]
-        Classe prédite si succès.
-    score : Optional[float]
-        Score associé si succès.
-    model_version : str
-        Version du modèle utilisée.
-    latency_ms : float
-        Temps d'inférence en millisecondes.
-    status : str
-        Statut de traitement ('success' ou 'error').
-    error_message : Optional[str]
-        Message d'erreur éventuel.
+    Item unitaire d'un batch de prédictions.
     """
 
     request_id: str
-    client_id: Optional[int] = None
-    prediction: Optional[int] = None
-    score: Optional[float] = None
-    model_version: str
-    latency_ms: float
+    client_id: int | None = None
+    prediction: int | None = None
+    score: float | None = None
+    threshold_used: float | None = None
+    model_name: str | None = None
+    model_version: str | None = None
+    latency_ms: float | None = None
     status: str
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
 
-class PredictBatchResponse(BaseModel):
+class PredictBatchResponse(StrictSchema):
     """
-    Schéma de réponse pour un batch de prédictions.
-
-    Attributes
-    ----------
-    batch_size : int
-        Taille totale du batch demandé.
-    success_count : int
-        Nombre de prédictions réussies.
-    error_count : int
-        Nombre de prédictions en erreur.
-    model_name : str
-        Nom du modèle utilisé.
-    model_version : str
-        Version du modèle utilisée.
-    batch_latency_ms : float
-        Temps total du batch en millisecondes.
-    items : list[PredictBatchItemResponse]
-        Détail ligne par ligne du batch.
+    Réponse batch de prédictions.
     """
 
     batch_size: int
@@ -390,16 +140,478 @@ class PredictBatchResponse(BaseModel):
     model_version: str
     batch_latency_ms: float
     items: list[PredictBatchItemResponse]
+    selected_client_ids: list[int] | None = None
 
 
-class HealthResponse(BaseModel):
+# =============================================================================
+# Registry modèle
+# =============================================================================
+
+class ModelRegistryCreateRequest(StrictSchema):
     """
-    Schéma de réponse pour l'endpoint de santé.
-
-    Attributes
-    ----------
-    status : str
-        État de santé de l'API.
+    Payload d'enregistrement ou de mise à jour d'une version de modèle.
     """
 
+    model_name: str = Field(..., description="Nom du modèle")
+    model_version: str = Field(..., description="Version du modèle")
+    stage: Literal["dev", "staging", "production", "archived"] = Field(
+        ...,
+        description="Stade du modèle",
+    )
+    run_id: str | None = Field(
+        default=None,
+        description="Identifiant du run MLflow",
+    )
+    source_path: str | None = Field(
+        default=None,
+        description="Chemin de l'artefact ou du modèle",
+    )
+    training_data_version: str | None = Field(
+        default=None,
+        description="Version des données d'entraînement",
+    )
+    feature_list: list[str] | None = Field(
+        default=None,
+        description="Liste des features attendues par le modèle",
+    )
+    hyperparameters: dict[str, Any] | None = Field(
+        default=None,
+        description="Hyperparamètres du modèle",
+    )
+    metrics: dict[str, Any] | None = Field(
+        default=None,
+        description="Métriques associées au modèle",
+    )
+    deployed_at: datetime | None = Field(
+        default=None,
+        description="Date de déploiement",
+    )
+    is_active: bool = Field(
+        default=False,
+        description="Indique si cette version devient active",
+    )
+
+
+class ModelRegistryBaseResponse(StrictSchema):
+    """
+    Base commune de réponse pour les objets du registre des modèles.
+    """
+
+    model_name: str
+    model_version: str
+    stage: str
+    run_id: str | None = None
+    source_path: str | None = None
+    training_data_version: str | None = None
+    feature_list: list[str] | None = None
+    hyperparameters: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
+    deployed_at: datetime | None = None
+    is_active: bool
+
+
+class ActiveModelResponse(ModelRegistryBaseResponse):
+    """
+    Réponse décrivant le modèle actif.
+    """
+
+    created_at: datetime
+
+
+class ModelRegistryItemResponse(ModelRegistryBaseResponse):
+    """
+    Représentation d'une ligne du registre des modèles.
+    """
+
+    id: int
+    created_at: datetime
+
+
+class ModelRegistryListResponse(CountItemsResponse):
+    """
+    Réponse listant les versions de modèles enregistrées.
+    """
+
+    items: list[ModelRegistryItemResponse]
+
+
+class ModelRegistryRegisterResponse(StrictSchema):
+    """
+    Réponse après enregistrement ou mise à jour d'une version de modèle.
+    """
+
+    message: str
+    model_name: str
+    model_version: str
+    stage: str
+    is_active: bool
+    deployed_at: datetime | None = None
+
+
+# =============================================================================
+# Alertes
+# =============================================================================
+
+class AlertBaseResponse(StrictSchema):
+    """
+    Base commune de réponse pour les alertes de monitoring.
+    """
+
+    alert_type: str
+    severity: str
+    model_name: str | None = None
+    model_version: str | None = None
+    feature_name: str | None = None
+    title: str
+    message: str
+    context: dict[str, Any] | None = None
     status: str
+
+
+class AlertResponse(AlertBaseResponse):
+    """
+    Représentation complète d'une alerte de monitoring.
+    """
+
+    id: int
+    created_at: datetime
+    acknowledged_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class AlertListResponse(CountItemsResponse):
+    """
+    Réponse listant les alertes récentes.
+    """
+
+    items: list[AlertResponse]
+
+
+class AlertActionResponse(StrictSchema):
+    """
+    Réponse standard pour les actions sur une alerte.
+    """
+
+    id: int
+    status: str
+    acknowledged_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+# =============================================================================
+# Monitoring summary / health
+# =============================================================================
+
+class MonitoringPredictionsSummary(StrictSchema):
+    """
+    Bloc synthétique sur les prédictions.
+    """
+
+    total_predictions: int
+    total_errors: int
+    error_rate: float
+    avg_latency_ms: float | None = None
+    last_prediction_at: datetime | None = None
+
+
+class MonitoringDriftSummary(StrictSchema):
+    """
+    Bloc synthétique sur la dérive.
+    """
+
+    total_drift_metrics: int
+    detected_drifts: int
+    drift_rate: float
+    last_drift_at: datetime | None = None
+
+
+class MonitoringAlertsSummary(StrictSchema):
+    """
+    Bloc synthétique sur les alertes.
+    """
+
+    open_alerts: int
+    acknowledged_alerts: int
+    resolved_alerts: int
+
+
+class EvaluationMetricSummary(StrictSchema):
+    """
+    Dernière métrique d'évaluation disponible.
+    """
+
+    id: int
+    dataset_name: str
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    roc_auc: float | None = None
+    pr_auc: float | None = None
+    precision_score: float | None = None
+    recall_score: float | None = None
+    f1_score: float | None = None
+    fbeta_score: float | None = None
+    business_cost: float | None = None
+    tn: int | None = None
+    fp: int | None = None
+    fn: int | None = None
+    tp: int | None = None
+    sample_size: int | None = None
+    computed_at: datetime
+
+
+class MonitoringSummaryResponse(StrictSchema):
+    """
+    Réponse de synthèse complète du monitoring.
+    """
+
+    model_name: str
+    model_version: str | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    predictions: MonitoringPredictionsSummary
+    drift: MonitoringDriftSummary
+    latest_evaluation: EvaluationMetricSummary | None = None
+    alerts: MonitoringAlertsSummary
+
+
+class MonitoringHealthResponse(StrictSchema):
+    """
+    Réponse d'état simple et lisible du monitoring.
+    """
+
+    model_name: str
+    model_version: str | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    has_predictions: bool
+    has_drift_metrics: bool
+    has_latest_evaluation: bool
+    open_alerts: int
+    avg_latency_ms: float | None = None
+    last_prediction_at: datetime | None = None
+    last_drift_at: datetime | None = None
+    latest_evaluation_at: datetime | None = None
+
+
+# =============================================================================
+# History / historique des prédictions
+# =============================================================================
+
+class PredictionHistoryItemResponse(StrictSchema):
+    """
+    Représentation d'une ligne d'historique de prédiction.
+    """
+
+    id: int
+    request_id: str
+    client_id: int | None = None
+    model_name: str | None = None
+    model_version: str | None = None
+    prediction: int | None = None
+    score: float | None = None
+    threshold_used: float | None = None
+    latency_ms: float | None = None
+    prediction_timestamp: datetime | None = None
+    status_code: int | None = None
+    error_message: str | None = None
+
+
+class PredictionHistoryResponse(PaginatedItemsResponse):
+    """
+    Réponse listant l'historique des prédictions.
+    """
+
+    items: list[PredictionHistoryItemResponse]
+
+
+class PredictionDetailResponse(BaseModel):
+    """
+    Réponse détaillée pour une prédiction donnée.
+
+    Notes
+    -----
+    On garde `extra="allow"` pour rester compatible avec les champs
+    réellement renvoyés par le service.
+    """
+
+    model_config = ConfigDict(
+        extra="allow",
+        populate_by_name=True,
+        from_attributes=True,
+    )
+
+    id: int
+    request_id: str
+    client_id: int | None = None
+    model_name: str | None = None
+    model_version: str | None = None
+    prediction: int | None = None
+    score: float | None = None
+    threshold_used: float | None = None
+    latency_ms: float | None = None
+    input_data: dict[str, Any] | None = None
+    output_data: dict[str, Any] | None = None
+    prediction_timestamp: datetime | None = None
+    status_code: int | None = None
+    error_message: str | None = None
+
+
+class GroundTruthItemResponse(StrictSchema):
+    """
+    Représentation d'une ligne de vérité terrain.
+    """
+
+    id: int
+    request_id: str | None = None
+    client_id: int | None = None
+    true_label: int
+    label_source: str | None = None
+    observed_at: datetime | None = None
+    notes: str | None = None
+
+
+class GroundTruthHistoryResponse(PaginatedItemsResponse):
+    """
+    Réponse listant les vérités terrain historisées.
+    """
+
+    items: list[GroundTruthItemResponse]
+
+
+class PredictionFeatureSnapshotItemResponse(StrictSchema):
+    """
+    Représentation d'une feature enregistrée dans un snapshot.
+    """
+
+    feature_name: str
+    feature_value: Any | None = None
+    feature_type: str | None = None
+
+
+class PredictionFeaturesSnapshotResponse(StrictSchema):
+    """
+    Réponse contenant le snapshot des features pour une requête.
+    """
+
+    request_id: str
+    client_id: int | None = None
+    model_name: str | None = None
+    model_version: str | None = None
+    snapshot_timestamp: datetime | None = None
+    feature_count: int
+    features: list[PredictionFeatureSnapshotItemResponse]
+
+
+# =============================================================================
+# Monitoring list payloads
+# =============================================================================
+
+class DriftMetricResponse(StrictSchema):
+    """
+    Représentation d'une métrique de drift.
+    """
+
+    id: int
+    model_name: str
+    model_version: str
+    feature_name: str
+    metric_name: str
+    reference_window_start: datetime | None = None
+    reference_window_end: datetime | None = None
+    current_window_start: datetime | None = None
+    current_window_end: datetime | None = None
+    metric_value: float
+    threshold_value: float | None = None
+    drift_detected: bool
+    details: dict[str, Any] | None = None
+    computed_at: datetime
+
+
+class DriftMetricListResponse(CountItemsResponse):
+    """
+    Réponse listant les métriques de drift.
+    """
+
+    items: list[DriftMetricResponse]
+
+
+class EvaluationMetricResponse(StrictSchema):
+    """
+    Représentation d'une métrique d'évaluation.
+    """
+
+    id: int
+    model_name: str
+    model_version: str
+    dataset_name: str
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    roc_auc: float | None = None
+    pr_auc: float | None = None
+    precision_score: float | None = None
+    recall_score: float | None = None
+    f1_score: float | None = None
+    fbeta_score: float | None = None
+    business_cost: float | None = None
+    tn: int | None = None
+    fp: int | None = None
+    fn: int | None = None
+    tp: int | None = None
+    sample_size: int | None = None
+    computed_at: datetime
+
+
+class EvaluationMetricListResponse(CountItemsResponse):
+    """
+    Réponse listant les métriques d'évaluation.
+    """
+
+    items: list[EvaluationMetricResponse]
+
+
+class FeatureStoreMonitoringItemResponse(StrictSchema):
+    """
+    Représentation d'une ligne du feature store monitoring.
+    """
+
+    id: int
+    request_id: str | None = None
+    client_id: int | None = None
+    model_name: str
+    model_version: str
+    feature_name: str
+    feature_value: str | None = None
+    feature_type: str | None = None
+    source_table: str | None = None
+    snapshot_timestamp: datetime
+
+
+class FeatureStoreMonitoringListResponse(CountItemsResponse):
+    """
+    Réponse listant le feature store monitoring.
+    """
+
+    items: list[FeatureStoreMonitoringItemResponse]
+
+
+# =============================================================================
+# Evidently
+# =============================================================================
+
+class EvidentlyRunResponse(StrictSchema):
+    """
+    Réponse de lancement d'une analyse Evidently.
+    """
+
+    success: bool
+    message: str
+    model_name: str | None = None
+    model_version: str | None = None
+    reference_kind: str | None = None
+    current_kind: str | None = None
+    logged_metrics: int
+    html_report_path: str | None = None
+    reference_rows: int
+    current_rows: int
+    analyzed_columns: list[str]
+    report: dict[str, Any] | None = None

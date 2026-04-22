@@ -6,8 +6,8 @@ par l'API de scoring crédit et le monitoring du modèle.
 
 Architecture actuelle
 ---------------------
-- les données de prédiction sont construites exclusivement
-  à partir de `application_test.csv`
+- les données de prédiction sont construites à partir d'un CSV source
+  configurable via l'environnement
 - PostgreSQL sert uniquement au stockage des logs et du monitoring
 """
 
@@ -33,18 +33,6 @@ load_dotenv()
 def _get_bool(name: str, default: str = "False") -> bool:
     """
     Lit une variable d'environnement booléenne.
-
-    Parameters
-    ----------
-    name : str
-        Nom de la variable d'environnement.
-    default : str
-        Valeur par défaut sous forme de chaîne.
-
-    Returns
-    -------
-    bool
-        Valeur booléenne interprétée.
     """
     return os.getenv(name, default).strip().lower() == "true"
 
@@ -52,18 +40,6 @@ def _get_bool(name: str, default: str = "False") -> bool:
 def _get_int(name: str, default: str) -> int:
     """
     Lit une variable d'environnement entière.
-
-    Parameters
-    ----------
-    name : str
-        Nom de la variable d'environnement.
-    default : str
-        Valeur par défaut.
-
-    Returns
-    -------
-    int
-        Valeur entière.
     """
     return int(os.getenv(name, default))
 
@@ -71,18 +47,6 @@ def _get_int(name: str, default: str) -> int:
 def _get_float(name: str, default: str) -> float:
     """
     Lit une variable d'environnement flottante.
-
-    Parameters
-    ----------
-    name : str
-        Nom de la variable d'environnement.
-    default : str
-        Valeur par défaut.
-
-    Returns
-    -------
-    float
-        Valeur flottante.
     """
     return float(os.getenv(name, default))
 
@@ -125,17 +89,20 @@ DEBUG_MODEL = _get_bool("DEBUG_MODEL", "False")
 # =============================================================================
 # Données CSV
 # =============================================================================
-# Toutes les données utilisées pour construire les features viennent
-# exclusivement du fichier application_test.csv
+# Les données utilisées pour construire les features viennent d'un CSV source
+# configurable via DATA_DIR + SOURCE_CSV.
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 
-APPLICATION_TEST_CSV = Path(
-    os.getenv("APPLICATION_TEST_CSV", str(DATA_DIR / "application_test.csv"))
-)
+SOURCE_CSV = os.getenv("SOURCE_CSV", "application_test.csv").strip()
+SIMULATION_SOURCE_CSV_NAME = os.getenv("SIMULATION_SOURCE_CSV", "").strip()
 
-SIMULATION_SOURCE_CSV = Path(
-    os.getenv("SIMULATION_SOURCE_CSV", str(APPLICATION_TEST_CSV))
+APPLICATION_CSV = DATA_DIR / SOURCE_CSV
+
+SIMULATION_SOURCE_CSV = (
+    DATA_DIR / SIMULATION_SOURCE_CSV_NAME
+    if SIMULATION_SOURCE_CSV_NAME
+    else APPLICATION_CSV
 )
 
 

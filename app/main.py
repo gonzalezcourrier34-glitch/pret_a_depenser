@@ -16,7 +16,7 @@ Architecture
 
 Architecture actuelle
 ---------------------
-- les données de prédiction proviennent exclusivement de `application_test.csv`
+- les données de prédiction proviennent exclusivement du `.csv`
 - le modèle et le seuil sont chargés au démarrage
 - PostgreSQL sert uniquement au logging et au monitoring
 """
@@ -30,10 +30,11 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 
+from app.api.route_evidently import router as evidently_router
 from app.api.route_history import router as history_router
 from app.api.route_monitoring import router as monitoring_router
 from app.api.route_predict import router as predict_router
-from app.core.config import APPLICATION_TEST_CSV, DEBUG
+from app.core.config import DEBUG
 from app.core.db import SessionLocal
 from app.services.data_loader_service import init_full_data_cache
 from app.services.model_loader_service import get_model, get_threshold
@@ -65,6 +66,10 @@ OPENAPI_TAGS = [
         "name": "Monitoring",
         "description": "Suivi du modèle, alertes, synthèses et état du monitoring.",
     },
+    {
+        "name": "Evidently",
+        "description": "Analyses de dérive de données via Evidently.",
+    },
 ]
 
 
@@ -89,20 +94,14 @@ async def lifespan(app: FastAPI):
     - la disponibilité minimale de la base PostgreSQL
     - le chargement en mémoire des données CSV métier
     """
-    # -------------------------------------------------------------------------
-    # STARTUP
-    # -------------------------------------------------------------------------
     print("[APP] Démarrage de l'application...")
 
-    # Vérification du chargement du modèle
     get_model()
     print("[APP] Modèle chargé.")
 
-    # Vérification du chargement du seuil
     get_threshold()
     print("[APP] Seuil chargé.")
 
-    # Vérification minimale de la base PostgreSQL
     db = SessionLocal()
     try:
         db.execute(text("SELECT 1"))
@@ -110,16 +109,12 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
-    # Chargement des données CSV en mémoire
-    print(f"[APP] Chargement du cache métier depuis : {APPLICATION_TEST_CSV}")
+    print("[APP] Chargement du cache métier CSV...")
     init_full_data_cache(debug=False)
     print("[APP] Cache CSV initialisé.")
 
     yield
 
-    # -------------------------------------------------------------------------
-    # SHUTDOWN
-    # -------------------------------------------------------------------------
     print("[APP] Arrêt de l'application.")
 
 
@@ -145,7 +140,7 @@ app = FastAPI(
 # =============================================================================
 
 @app.get("/", include_in_schema=False)
-def root():
+def root() -> RedirectResponse:
     """
     Redirige vers la documentation interactive de l'API.
 
@@ -164,3 +159,4 @@ def root():
 app.include_router(predict_router)
 app.include_router(history_router)
 app.include_router(monitoring_router)
+app.include_router(evidently_router)

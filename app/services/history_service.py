@@ -21,8 +21,41 @@ Fonctionnalités
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+def _prediction_label_from_value(prediction: int | None) -> str | None:
+    """
+    Convertit une valeur binaire de prédiction en libellé métier.
+    """
+    if prediction == 0:
+        return "accepted"
+    if prediction == 1:
+        return "refused"
+    return None
+
+
+def _status_from_row(error_message: str | None, status_code: int | None) -> str | None:
+    """
+    Déduit un statut lisible à partir du code HTTP et/ou du message d'erreur.
+    """
+    if error_message:
+        return "error"
+
+    if status_code is None:
+        return None
+
+    if 200 <= status_code < 300:
+        return "success"
+
+    return "error"
 
 
 # =============================================================================
@@ -38,31 +71,10 @@ def get_prediction_history(
     model_name: str | None = None,
     model_version: str | None = None,
     only_errors: bool = False,
-) -> dict:
+    prediction_value: int | None = None,
+) -> dict[str, Any]:
     """
     Retourne l'historique des prédictions journalisées.
-
-    Parameters
-    ----------
-    db : Session
-        Session SQLAlchemy active.
-    limit : int
-        Nombre maximal de lignes retournées.
-    offset : int
-        Décalage pour la pagination.
-    client_id : int | None
-        Filtre optionnel sur un identifiant client.
-    model_name : str | None
-        Filtre optionnel sur le nom du modèle.
-    model_version : str | None
-        Filtre optionnel sur la version du modèle.
-    only_errors : bool
-        Si True, retourne uniquement les prédictions en erreur.
-
-    Returns
-    -------
-    dict
-        Historique des prédictions.
     """
     sql = """
     SELECT
@@ -102,6 +114,10 @@ def get_prediction_history(
     if only_errors:
         sql += " AND error_message IS NOT NULL"
 
+    if prediction_value is not None:
+        sql += " AND prediction = :prediction_value"
+        params["prediction_value"] = prediction_value
+
     sql += """
     ORDER BY prediction_timestamp DESC
     LIMIT :limit OFFSET :offset
@@ -109,29 +125,44 @@ def get_prediction_history(
 
     rows = db.execute(text(sql), params).mappings().all()
 
+    items = []
+    for row in rows:
+        prediction = row["prediction"]
+        error_message = row["error_message"]
+        status_code = row["status_code"]
+
+        items.append(
+            {
+                "id": row["id"],
+                "request_id": row["request_id"],
+                "client_id": row["client_id"],
+                "model_name": row["model_name"],
+                "model_version": row["model_version"],
+                "prediction": prediction,
+                "score": row["score"],
+                "threshold_used": row["threshold_used"],
+                "latency_ms": row["latency_ms"],
+                "prediction_timestamp": row["prediction_timestamp"],
+                "status_code": status_code,
+                "error_message": error_message,
+            }
+        )
+
     return {
-        "count": len(rows),
+        "count": len(items),
         "limit": limit,
         "offset": offset,
-        "items": [dict(row) for row in rows],
+        "items": items,
     }
 
 
-def get_prediction_detail(db: Session, *, request_id: str) -> dict | None:
+def get_prediction_detail(
+    db: Session,
+    *,
+    request_id: str,
+) -> dict[str, Any] | None:
     """
     Retourne le détail complet d'une prédiction.
-
-    Parameters
-    ----------
-    db : Session
-        Session SQLAlchemy active.
-    request_id : str
-        Identifiant unique de requête.
-
-    Returns
-    -------
-    dict | None
-        Détail de la prédiction ou None si introuvable.
     """
     sql = text(
         """
@@ -158,7 +189,25 @@ def get_prediction_detail(db: Session, *, request_id: str) -> dict | None:
 
     row = db.execute(sql, {"request_id": request_id}).mappings().first()
 
-    return dict(row) if row else None
+    if row is None:
+        return None
+
+    return {
+        "id": row["id"],
+        "request_id": row["request_id"],
+        "client_id": row["client_id"],
+        "model_name": row["model_name"],
+        "model_version": row["model_version"],
+        "prediction": row["prediction"],
+        "score": row["score"],
+        "threshold_used": row["threshold_used"],
+        "latency_ms": row["latency_ms"],
+        "input_data": row["input_data"],
+        "output_data": row["output_data"],
+        "prediction_timestamp": row["prediction_timestamp"],
+        "status_code": row["status_code"],
+        "error_message": row["error_message"],
+    }
 
 
 # =============================================================================
@@ -172,27 +221,9 @@ def get_ground_truth_history(
     offset: int = 0,
     client_id: int | None = None,
     request_id: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """
     Retourne l'historique des vérités terrain enregistrées.
-
-    Parameters
-    ----------
-    db : Session
-        Session SQLAlchemy active.
-    limit : int
-        Nombre maximal de lignes retournées.
-    offset : int
-        Décalage pour la pagination.
-    client_id : int | None
-        Filtre optionnel sur l'identifiant client.
-    request_id : str | None
-        Filtre optionnel sur l'identifiant de requête.
-
-    Returns
-    -------
-    dict
-        Historique des vérités terrain.
     """
     sql = """
     SELECT
@@ -227,11 +258,24 @@ def get_ground_truth_history(
 
     rows = db.execute(text(sql), params).mappings().all()
 
+    items = [
+        {
+            "id": row["id"],
+            "request_id": row["request_id"],
+            "client_id": row["client_id"],
+            "true_label": row["true_label"],
+            "label_source": row["label_source"],
+            "observed_at": row["observed_at"],
+            "notes": row["notes"],
+        }
+        for row in rows
+    ]
+
     return {
-        "count": len(rows),
+        "count": len(items),
         "limit": limit,
         "offset": offset,
-        "items": [dict(row) for row in rows],
+        "items": items,
     }
 
 
@@ -243,21 +287,9 @@ def get_prediction_features_snapshot(
     db: Session,
     *,
     request_id: str,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """
     Retourne le snapshot des features enregistré pour une requête.
-
-    Parameters
-    ----------
-    db : Session
-        Session SQLAlchemy active.
-    request_id : str
-        Identifiant unique de requête.
-
-    Returns
-    -------
-    dict | None
-        Snapshot des features ou None si introuvable.
     """
     sql = text(
         """

@@ -16,33 +16,13 @@ Principe d'architecture
 Les routes FastAPI doivent rester fines :
 - elles valident et reçoivent les entrées HTTP
 - elles appellent les services métier
+- elles gèrent la transaction HTTP lorsque nécessaire
 - elles retournent la réponse HTTP
 
 La logique métier ne doit pas être implémentée directement ici.
-
-Endpoints
----------
-- GET /predict/health
-    Vérifie que l'API, la base et le modèle sont accessibles.
-
-- POST /predict
-    Réalise une prédiction unitaire à partir des données d'entrée.
-
-- POST /predict/batch
-    Réalise plusieurs prédictions en une seule requête.
-
-- POST /predict/simulate/real-sample
-    Lance jusqu'à 200 prédictions à partir de clients réels
-    tirés aléatoirement depuis la source de données.
-
-- POST /predict/simulate/random
-    Lance jusqu'à 200 prédictions à partir de données artificielles
-    générées à partir du profil des features observées.
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import text
@@ -50,11 +30,17 @@ from sqlalchemy.orm import Session
 
 from app.core.config import SIMULATION_DEFAULT_ITEMS, SIMULATION_MAX_ITEMS
 from app.core.db import get_db
-from app.core.schemas import HealthResponse, PredictRequest, PredictResponse
+from app.core.schemas import (
+    HealthResponse,
+    PredictBatchResponse,
+    PredictRequest,
+    PredictResponse,
+)
 from app.core.security import verify_api_key
 from app.services.model_loader_service import get_model, get_threshold
 from app.services.prediction_service import (
     make_prediction,
+    make_prediction_from_client_id,
     run_batch_prediction,
     run_random_feature_simulation,
     run_real_client_simulation,
@@ -85,16 +71,6 @@ def health(
 ) -> HealthResponse:
     """
     Vérifie que l'API, PostgreSQL, le modèle et le seuil sont accessibles.
-
-    Parameters
-    ----------
-    db : Session
-        Session SQLAlchemy injectée par FastAPI.
-
-    Returns
-    -------
-    HealthResponse
-        Objet indiquant l'état de santé de l'application.
     """
     try:
         db.execute(text("SELECT 1"))
@@ -125,20 +101,6 @@ def predict(
 ) -> PredictResponse:
     """
     Réalise une prédiction unitaire à partir des données d'entrée.
-
-    Cette route délègue la logique métier au service de prédiction.
-
-    Parameters
-    ----------
-    payload : PredictRequest
-        Requête de prédiction contenant les features d'entrée.
-    db : Session
-        Session SQLAlchemy active.
-
-    Returns
-    -------
-    PredictResponse
-        Résultat de la prédiction.
     """
     try:
         features = payload.features.model_dump(by_alias=True)
@@ -155,6 +117,8 @@ def predict(
                 "Le service de prédiction devait retourner un dictionnaire."
             )
 
+        db.commit()
+
         return PredictResponse(
             request_id=result["request_id"],
             prediction=result["prediction"],
@@ -164,13 +128,16 @@ def predict(
         )
 
     except HTTPException:
+        db.rollback()
         raise
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Prediction failed: {exc}",
         ) from exc
     except Exception as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Prediction failed: {exc}",
@@ -183,6 +150,7 @@ def predict(
 
 @router.post(
     "/batch",
+    response_model=PredictBatchResponse,
     summary="Réaliser un batch de prédictions",
 )
 def predict_batch(
@@ -194,23 +162,9 @@ def predict_batch(
     ),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> PredictBatchResponse:
     """
     Réalise un batch de prédictions à partir d'une liste d'entrées.
-
-    Cette route délègue la logique métier au service de prédiction batch.
-
-    Parameters
-    ----------
-    payloads : list[PredictRequest]
-        Liste des entrées à scorer.
-    db : Session
-        Session SQLAlchemy active.
-
-    Returns
-    -------
-    dict[str, Any]
-        Résumé global du batch et résultats détaillés.
     """
     try:
         normalized_payloads = [
@@ -221,32 +175,86 @@ def predict_batch(
             for item in payloads
         ]
 
-        return run_batch_prediction(
+        result = run_batch_prediction(
             payloads=normalized_payloads,
             db=db,
             source_table="api_batch_request",
         )
 
+        db.commit()
+        return PredictBatchResponse(**result)
+
     except HTTPException:
+        db.rollback()
         raise
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Batch prediction failed: {exc}",
         ) from exc
     except Exception as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Batch prediction failed: {exc}",
         ) from exc
 
+@router.get(
+    "/{client_id}",
+    response_model=PredictResponse,
+    summary="Réaliser une prédiction à partir d'un identifiant client",
+)
 
+def predict_from_client_id(
+    client_id: int,
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_api_key),
+) -> PredictResponse:
+    """
+    Réalise une prédiction unitaire à partir d'un identifiant client
+    existant dans le cache de features prêtes.
+    """
+    try:
+        result = make_prediction_from_client_id(
+            client_id=client_id,
+            db=db,
+            source_table="features_ready_cache",
+        )
+
+        if not isinstance(result, dict):
+            raise TypeError(
+                "Le service de prédiction devait retourner un dictionnaire."
+            )
+
+        db.commit()
+
+        return PredictResponse(
+            request_id=result["request_id"],
+            prediction=result["prediction"],
+            score=result["score"],
+            model_version=result["model_version"],
+            latency_ms=result["latency_ms"],
+        )
+
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur interne lors de la prédiction : {exc}",
+        ) from exc
+    
 # =============================================================================
 # Endpoint simulation à partir de données réelles
 # =============================================================================
 
 @router.post(
     "/simulate/real-sample",
+    response_model=PredictBatchResponse,
     summary="Lancer jusqu'à 200 prédictions à partir de données réelles",
 )
 def simulate_real_sample_predictions(
@@ -262,42 +270,32 @@ def simulate_real_sample_predictions(
     ),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> PredictBatchResponse:
     """
     Lance une simulation de prédictions à partir de clients réels.
-
-    Toute la logique métier est déléguée au service de simulation.
-
-    Parameters
-    ----------
-    limit : int
-        Nombre de clients à traiter.
-    random_seed : int | None
-        Graine aléatoire optionnelle.
-    db : Session
-        Session SQLAlchemy active.
-
-    Returns
-    -------
-    dict[str, Any]
-        Résumé global de la simulation et détails.
     """
     try:
-        return run_real_client_simulation(
+        result = run_real_client_simulation(
             limit=limit,
             random_seed=random_seed,
             db=db,
             source_table="simulate_real_sample",
         )
 
+        db.commit()
+        return PredictBatchResponse(**result)
+
     except HTTPException:
+        db.rollback()
         raise
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Simulation sur données réelles impossible: {exc}",
         ) from exc
     except Exception as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Simulation sur données réelles impossible: {exc}",
@@ -310,6 +308,7 @@ def simulate_real_sample_predictions(
 
 @router.post(
     "/simulate/random",
+    response_model=PredictBatchResponse,
     summary="Lancer jusqu'à 200 prédictions à partir de données aléatoires",
 )
 def simulate_random_predictions(
@@ -321,39 +320,31 @@ def simulate_random_predictions(
     ),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> PredictBatchResponse:
     """
     Lance une simulation de prédictions à partir de données artificielles.
-
-    Toute la logique métier est déléguée au service de simulation.
-
-    Parameters
-    ----------
-    limit : int
-        Nombre de lignes artificielles à générer.
-    db : Session
-        Session SQLAlchemy active.
-
-    Returns
-    -------
-    dict[str, Any]
-        Résumé global de la simulation et détails.
     """
     try:
-        return run_random_feature_simulation(
+        result = run_random_feature_simulation(
             limit=limit,
             db=db,
             source_table="simulate_random",
         )
 
+        db.commit()
+        return PredictBatchResponse(**result)
+
     except HTTPException:
+        db.rollback()
         raise
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Simulation sur données aléatoires impossible: {exc}",
         ) from exc
     except Exception as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Simulation sur données aléatoires impossible: {exc}",

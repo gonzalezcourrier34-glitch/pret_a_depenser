@@ -41,6 +41,7 @@ from dashboard_request import (
     build_tables_status_dataframe,
     call_predict_api,
     call_predict_batch_api,
+    call_predict_client_api,
     call_predict_fully_random_batch_api,
     call_predict_real_random_batch_api,
     get_active_model,
@@ -52,11 +53,12 @@ from dashboard_request import (
     get_ground_truth_history,
     get_health,
     get_models,
+    get_monitoring_health,
     get_monitoring_summary,
     get_prediction_detail,
     get_prediction_features_snapshot,
     get_prediction_history,
-    load_client_features,
+    metric_safe_number,
 )
 from dashboard_systeme import render_systeme_page
 
@@ -71,9 +73,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-ALLOWED_FEATURES_TABLES: set[str] = {
-    "application_test",
-}
+
 # =============================================================================
 # Style
 # =============================================================================
@@ -104,117 +104,9 @@ def inject_css() -> None:
 # Helpers
 # =============================================================================
 
-def dataframe_to_payload(df: pd.DataFrame) -> dict[str, Any]:
-    """
-    Convertit une ligne de DataFrame en payload compatible avec l'API /predict.
-
-    Notes
-    -----
-    Le payload attendu par l'API est :
-    {
-        "SK_ID_CURR": ...,
-        "features": {...}
-    }
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame contenant au moins une ligne.
-
-    Returns
-    -------
-    dict[str, Any]
-        Payload API prêt à envoyer.
-    """
-    if df.empty:
-        return {}
-
-    row = df.iloc[0]
-    features: dict[str, Any] = {}
-    client_id = None
-
-    for key, value in row.items():
-        python_value: Any
-
-        if pd.isna(value):
-            python_value = None
-        elif isinstance(value, pd.Timestamp):
-            python_value = value.isoformat()
-        else:
-            python_value = value.item() if hasattr(value, "item") else value
-
-        if key == "SK_ID_CURR":
-            client_id = python_value
-        elif key != "TARGET":
-            features[key] = python_value
-
-    return {
-        "SK_ID_CURR": client_id,
-        "features": features,
-    }
-
-
-def metric_safe_number(
-    df: pd.DataFrame,
-    col: str,
-    agg: str = "mean",
-    default: float | None = 0.0,
-) -> float | None:
-    """
-    Calcule une statistique simple sur une colonne numérique.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame source.
-    col : str
-        Colonne à agréger.
-    agg : str, default="mean"
-        Type d'agrégation.
-    default : float | None, default=0.0
-        Valeur de repli.
-
-    Returns
-    -------
-    float | None
-        Statistique calculée ou valeur par défaut.
-    """
-    if df.empty or col not in df.columns:
-        return default
-
-    series = pd.to_numeric(df[col], errors="coerce").dropna()
-    if series.empty:
-        return default
-
-    if agg == "mean":
-        return float(series.mean())
-    if agg == "sum":
-        return float(series.sum())
-    if agg == "max":
-        return float(series.max())
-    if agg == "min":
-        return float(series.min())
-    if agg == "p95":
-        return float(series.quantile(0.95))
-    if agg == "p99":
-        return float(series.quantile(0.99))
-
-    return default
-
-
 def safe_dataframe(value: Any) -> pd.DataFrame:
     """
     Retourne un DataFrame vide si la valeur reçue n'est pas un DataFrame.
-
-    Parameters
-    ----------
-    value : Any
-        Valeur à sécuriser.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame valide.
     """
     return value if isinstance(value, pd.DataFrame) else pd.DataFrame()
 
@@ -222,16 +114,6 @@ def safe_dataframe(value: Any) -> pd.DataFrame:
 def safe_dict(value: Any) -> dict[str, Any]:
     """
     Retourne un dictionnaire vide si la valeur reçue n'est pas un dict.
-
-    Parameters
-    ----------
-    value : Any
-        Valeur à sécuriser.
-
-    Returns
-    -------
-    dict[str, Any]
-        Dictionnaire valide.
     """
     return value if isinstance(value, dict) else {}
 
@@ -239,6 +121,18 @@ def safe_dict(value: Any) -> dict[str, Any]:
 # =============================================================================
 # Wrappers API pour les pages
 # =============================================================================
+
+def call_predict_client_api_wrapper(client_id: int) -> tuple[bool, Any]:
+    """
+    Wrapper local pour appeler /predict/{client_id}
+    avec la configuration du dashboard.
+    """
+    return call_predict_client_api(
+        client_id=client_id,
+        base_url=API_URL,
+        api_key=API_KEY,
+    )
+
 
 def call_predict_api_wrapper(payload: dict[str, Any]) -> tuple[bool, Any]:
     """
@@ -323,19 +217,7 @@ def get_ground_truth_by_request_id_wrapper(
         ground_truth_df=ground_truth_df,
     )
 
-def load_client_features_wrapper(
-    client_id: int,
-    source_table: str,
-) -> pd.DataFrame:
-    """
-    Wrapper local pour charger les features d'un client via l'API.
-    """
-    return load_client_features(
-        client_id,
-        source_table,
-        base_url=API_URL,
-        api_key=API_KEY,
-    )
+
 # =============================================================================
 # Chargements communs via l'API
 # =============================================================================
@@ -377,6 +259,15 @@ def load_shared_data(limit: int) -> dict[str, Any]:
 
     monitoring_summary = safe_dict(
         get_monitoring_summary(
+            base_url=API_URL,
+            api_key=API_KEY,
+            model_name=MODEL_NAME,
+            model_version=MODEL_VERSION or None,
+        )
+    )
+
+    monitoring_health = safe_dict(
+        get_monitoring_health(
             base_url=API_URL,
             api_key=API_KEY,
             model_name=MODEL_NAME,
@@ -467,6 +358,7 @@ def load_shared_data(limit: int) -> dict[str, Any]:
         "prediction_logs_df": prediction_logs_df,
         "ground_truth_df": ground_truth_df,
         "monitoring_summary": monitoring_summary,
+        "monitoring_health": monitoring_health,
         "model_registry_df": model_registry_df,
         "active_model_df": active_model_df,
         "evaluation_metrics_df": evaluation_metrics_df,
@@ -534,6 +426,7 @@ health_data = safe_dict(shared.get("health_data"))
 prediction_logs_df = safe_dataframe(shared.get("prediction_logs_df"))
 ground_truth_df = safe_dataframe(shared.get("ground_truth_df"))
 monitoring_summary = safe_dict(shared.get("monitoring_summary"))
+monitoring_health = safe_dict(shared.get("monitoring_health"))
 model_registry_df = safe_dataframe(shared.get("model_registry_df"))
 active_model_df = safe_dataframe(shared.get("active_model_df"))
 evaluation_metrics_df = safe_dataframe(shared.get("evaluation_metrics_df"))
@@ -562,11 +455,9 @@ if page == "Système / Données":
 
 elif page == "Prédictions / Traçabilité":
     render_predictions_page(
-        ALLOWED_FEATURES_TABLES=ALLOWED_FEATURES_TABLES,
         prediction_logs_df=prediction_logs_df,
         ground_truth_df=ground_truth_df,
-        load_client_features=load_client_features_wrapper,
-        dataframe_to_payload=dataframe_to_payload,
+        call_predict_client_api=call_predict_client_api_wrapper,
         call_predict_api=call_predict_api_wrapper,
         call_predict_batch_api=call_predict_batch_api_wrapper,
         get_prediction_detail=get_prediction_detail_wrapper,
@@ -576,10 +467,11 @@ elif page == "Prédictions / Traçabilité":
         call_predict_real_random_batch_api=call_predict_real_random_batch_api_wrapper,
         call_predict_fully_random_batch_api=call_predict_fully_random_batch_api_wrapper,
     )
-    
+
 elif page == "Monitoring":
     render_monitoring_page(
         monitoring_summary=monitoring_summary,
+        monitoring_health=monitoring_health,
         prediction_logs_df=prediction_logs_df,
         model_registry_df=model_registry_df,
         active_model_df=active_model_df,

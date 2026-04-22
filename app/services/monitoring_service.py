@@ -12,14 +12,16 @@ Ce module orchestre les opérations de monitoring :
 
 Objectif
 --------
-Porter la logique métier et utiliser la couche CRUD comme
-couche technique d'accès à la base.
+Porter la logique métier et utiliser les couches CRUD
+comme couches techniques d'accès à la base.
 
 Notes
 -----
 - Les commits restent gérés par l'appelant.
-- Cette couche ne doit pas contenir de SQLAlchemy query complexes
-  directement si elles existent déjà dans crud.monitoring.
+- Cette couche ne doit pas faire d'accès ORM direct.
+- Cette couche ne doit pas écrire directement dans les tables.
+- Les lectures / écritures passent par crud.monitoring
+  et, pour les logs de prédiction, par crud.prediction.
 """
 
 from __future__ import annotations
@@ -30,14 +32,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.crud import monitoring as monitoring_crud
-from app.model.model_SQLalchemy import (
-    Alert,
-    DriftMetric,
-    EvaluationMetric,
-    FeatureStoreMonitoring,
-    ModelRegistry,
-    PredictionLog,
-)
+from app.crud import prediction as prediction_crud
+from app.model.model_SQLalchemy import Alert, ModelRegistry
 
 
 # =============================================================================
@@ -49,6 +45,15 @@ def _utc_now() -> datetime:
     Retourne l'heure actuelle en UTC.
     """
     return datetime.now(timezone.utc)
+
+
+def _safe_divide(numerator: int | float, denominator: int | float) -> float:
+    """
+    Effectue une division sécurisée.
+    """
+    if denominator == 0:
+        return 0.0
+    return float(numerator) / float(denominator)
 
 
 # =============================================================================
@@ -163,16 +168,19 @@ class MonitoringService:
                 is_active=is_active,
             )
         else:
-            entity.stage = stage
-            entity.run_id = run_id
-            entity.source_path = source_path
-            entity.training_data_version = training_data_version
-            entity.feature_list = feature_list
-            entity.hyperparameters = hyperparameters
-            entity.metrics = metrics
-            entity.deployed_at = deployed_at
-            entity.is_active = is_active
-            self.db.flush()
+            entity = monitoring_crud.update_model_record(
+                self.db,
+                entity=entity,
+                stage=stage,
+                run_id=run_id,
+                source_path=source_path,
+                training_data_version=training_data_version,
+                feature_list=feature_list,
+                hyperparameters=hyperparameters,
+                metrics=metrics,
+                deployed_at=deployed_at,
+                is_active=is_active,
+            )
 
         if is_active:
             monitoring_crud.deactivate_other_model_versions(
@@ -180,9 +188,6 @@ class MonitoringService:
                 model_name=model_name,
                 keep_model_id=entity.id,
             )
-
-        self.db.flush()
-        self.db.refresh(entity)
 
         return {
             "message": "Version de modèle enregistrée avec succès.",
@@ -212,11 +217,11 @@ class MonitoringService:
         reference_window_end: datetime | None = None,
         current_window_start: datetime | None = None,
         current_window_end: datetime | None = None,
-    ) -> DriftMetric:
+    ) -> dict[str, Any]:
         """
-        Enregistre une métrique de drift.
+        Journalise une métrique de drift via la couche CRUD.
         """
-        return monitoring_crud.create_drift_metric_record(
+        entity = monitoring_crud.create_drift_metric_record(
             self.db,
             model_name=model_name,
             model_version=model_version,
@@ -233,6 +238,16 @@ class MonitoringService:
             computed_at=_utc_now(),
         )
 
+        return {
+            "id": entity.id,
+            "model_name": entity.model_name,
+            "model_version": entity.model_version,
+            "feature_name": entity.feature_name,
+            "metric_name": entity.metric_name,
+            "drift_detected": entity.drift_detected,
+            "computed_at": entity.computed_at,
+        }
+
     def get_drift_metrics(
         self,
         *,
@@ -240,6 +255,7 @@ class MonitoringService:
         model_name: str | None = None,
         model_version: str | None = None,
         feature_name: str | None = None,
+        metric_name: str | None = None,
         drift_detected: bool | None = None,
         window_start: datetime | None = None,
         window_end: datetime | None = None,
@@ -247,17 +263,17 @@ class MonitoringService:
         """
         Retourne les métriques de drift.
         """
-        query = monitoring_crud.build_drift_metrics_query(
+        rows = monitoring_crud.list_drift_metrics(
             self.db,
+            limit=limit,
             model_name=model_name,
             model_version=model_version,
             feature_name=feature_name,
+            metric_name=metric_name,
             drift_detected=drift_detected,
             window_start=window_start,
             window_end=window_end,
         )
-
-        rows = query.order_by(DriftMetric.computed_at.desc()).limit(limit).all()
 
         return {
             "count": len(rows),
@@ -306,11 +322,11 @@ class MonitoringService:
         fn: int | None = None,
         tp: int | None = None,
         sample_size: int | None = None,
-    ) -> EvaluationMetric:
+    ) -> dict[str, Any]:
         """
-        Enregistre des métriques d'évaluation.
+        Enregistre des métriques d'évaluation via la couche CRUD.
         """
-        return monitoring_crud.create_evaluation_metric_record(
+        entity = monitoring_crud.create_evaluation_metric_record(
             self.db,
             model_name=model_name,
             model_version=model_version,
@@ -332,6 +348,14 @@ class MonitoringService:
             computed_at=_utc_now(),
         )
 
+        return {
+            "id": entity.id,
+            "model_name": entity.model_name,
+            "model_version": entity.model_version,
+            "dataset_name": entity.dataset_name,
+            "computed_at": entity.computed_at,
+        }
+
     def get_evaluation_metrics(
         self,
         *,
@@ -345,16 +369,15 @@ class MonitoringService:
         """
         Retourne les métriques d'évaluation.
         """
-        query = monitoring_crud.build_evaluation_metrics_query(
+        rows = monitoring_crud.list_evaluation_metrics(
             self.db,
+            limit=limit,
             model_name=model_name,
             model_version=model_version,
             dataset_name=dataset_name,
             window_start=window_start,
             window_end=window_end,
         )
-
-        rows = query.order_by(EvaluationMetric.computed_at.desc()).limit(limit).all()
 
         return {
             "count": len(rows),
@@ -397,24 +420,25 @@ class MonitoringService:
         feature_name: str | None = None,
         model_name: str | None = None,
         model_version: str | None = None,
+        source_table: str | None = None,
         window_start: datetime | None = None,
         window_end: datetime | None = None,
     ) -> dict[str, Any]:
         """
         Retourne le feature store de monitoring.
         """
-        query = monitoring_crud.build_feature_store_query(
+        rows = monitoring_crud.list_feature_store_records(
             self.db,
+            limit=limit,
             request_id=request_id,
             client_id=client_id,
             feature_name=feature_name,
             model_name=model_name,
             model_version=model_version,
+            source_table=source_table,
             window_start=window_start,
             window_end=window_end,
         )
-
-        rows = query.order_by(FeatureStoreMonitoring.snapshot_timestamp.desc()).limit(limit).all()
 
         return {
             "count": len(rows),
@@ -453,7 +477,7 @@ class MonitoringService:
         status: str = "open",
     ) -> Alert:
         """
-        Crée une alerte de monitoring.
+        Crée une alerte de monitoring via la couche CRUD.
         """
         return monitoring_crud.create_alert_record(
             self.db,
@@ -475,27 +499,33 @@ class MonitoringService:
         limit: int = 50,
         status: str | None = None,
         severity: str | None = None,
+        alert_type: str | None = None,
         model_name: str | None = None,
         model_version: str | None = None,
+        feature_name: str | None = None,
     ) -> list[Alert]:
         """
         Retourne les alertes récentes.
         """
-        query = monitoring_crud.build_alerts_query(
+        return monitoring_crud.list_alert_records(
             self.db,
+            limit=limit,
             status=status,
             severity=severity,
+            alert_type=alert_type,
             model_name=model_name,
             model_version=model_version,
+            feature_name=feature_name,
         )
-
-        return query.order_by(Alert.created_at.desc()).limit(limit).all()
 
     def acknowledge_alert(self, alert_id: int) -> Alert | None:
         """
         Marque une alerte comme reconnue.
         """
-        alert = monitoring_crud.get_alert_by_id(self.db, alert_id=alert_id)
+        alert = monitoring_crud.get_alert_by_id(
+            self.db,
+            alert_id=alert_id,
+        )
 
         if alert is None:
             return None
@@ -503,29 +533,34 @@ class MonitoringService:
         if alert.status == "resolved":
             return alert
 
-        alert.status = "acknowledged"
-        alert.acknowledged_at = _utc_now()
-        self.db.flush()
-
-        return alert
+        return monitoring_crud.update_alert_status(
+            self.db,
+            alert=alert,
+            status="acknowledged",
+            acknowledged_at=_utc_now(),
+        )
 
     def resolve_alert(self, alert_id: int) -> Alert | None:
         """
         Marque une alerte comme résolue.
         """
-        alert = monitoring_crud.get_alert_by_id(self.db, alert_id=alert_id)
+        alert = monitoring_crud.get_alert_by_id(
+            self.db,
+            alert_id=alert_id,
+        )
 
         if alert is None:
             return None
 
-        if alert.acknowledged_at is None:
-            alert.acknowledged_at = _utc_now()
+        acknowledged_at = alert.acknowledged_at or _utc_now()
 
-        alert.status = "resolved"
-        alert.resolved_at = _utc_now()
-        self.db.flush()
-
-        return alert
+        return monitoring_crud.update_alert_status(
+            self.db,
+            alert=alert,
+            status="resolved",
+            acknowledged_at=acknowledged_at,
+            resolved_at=_utc_now(),
+        )
 
     # =========================================================================
     # Synthèse monitoring
@@ -542,7 +577,7 @@ class MonitoringService:
         """
         Retourne une synthèse complète du monitoring.
         """
-        prediction_query = monitoring_crud.build_prediction_logs_query(
+        total_predictions = prediction_crud.count_prediction_logs(
             self.db,
             model_name=model_name,
             model_version=model_version,
@@ -550,7 +585,7 @@ class MonitoringService:
             window_end=window_end,
         )
 
-        drift_query = monitoring_crud.build_drift_metrics_query(
+        total_errors = prediction_crud.count_prediction_errors(
             self.db,
             model_name=model_name,
             model_version=model_version,
@@ -558,7 +593,7 @@ class MonitoringService:
             window_end=window_end,
         )
 
-        evaluation_query = monitoring_crud.build_evaluation_metrics_query(
+        last_prediction = prediction_crud.get_latest_prediction_log(
             self.db,
             model_name=model_name,
             model_version=model_version,
@@ -566,37 +601,74 @@ class MonitoringService:
             window_end=window_end,
         )
 
-        alert_query = monitoring_crud.build_alerts_query(
+        avg_latency_ms = prediction_crud.get_average_latency_ms(
             self.db,
             model_name=model_name,
             model_version=model_version,
+            window_start=window_start,
+            window_end=window_end,
         )
 
-        if window_start is not None:
-            alert_query = alert_query.filter(Alert.created_at >= window_start)
+        total_drift_metrics = monitoring_crud.count_drift_metrics(
+            self.db,
+            model_name=model_name,
+            model_version=model_version,
+            drift_detected=None,
+            window_start=window_start,
+            window_end=window_end,
+        )
 
-        if window_end is not None:
-            alert_query = alert_query.filter(Alert.created_at < window_end)
+        detected_drifts = monitoring_crud.count_drift_metrics(
+            self.db,
+            model_name=model_name,
+            model_version=model_version,
+            drift_detected=True,
+            window_start=window_start,
+            window_end=window_end,
+        )
 
-        total_predictions = prediction_query.count()
-        total_errors = prediction_query.filter(PredictionLog.error_message.is_not(None)).count()
+        last_drift = monitoring_crud.get_latest_drift_metric(
+            self.db,
+            model_name=model_name,
+            model_version=model_version,
+            window_start=window_start,
+            window_end=window_end,
+        )
 
-        last_prediction = prediction_query.order_by(
-            PredictionLog.prediction_timestamp.desc()
-        ).first()
+        latest_evaluation = monitoring_crud.get_latest_evaluation_metric(
+            self.db,
+            model_name=model_name,
+            model_version=model_version,
+            window_start=window_start,
+            window_end=window_end,
+        )
 
-        last_drift = drift_query.order_by(DriftMetric.computed_at.desc()).first()
+        open_alerts = monitoring_crud.count_alert_records(
+            self.db,
+            status="open",
+            model_name=model_name,
+            model_version=model_version,
+            created_after=window_start,
+            created_before=window_end,
+        )
 
-        latest_evaluation = evaluation_query.order_by(
-            EvaluationMetric.computed_at.desc()
-        ).first()
+        acknowledged_alerts = monitoring_crud.count_alert_records(
+            self.db,
+            status="acknowledged",
+            model_name=model_name,
+            model_version=model_version,
+            created_after=window_start,
+            created_before=window_end,
+        )
 
-        total_drift_metrics = drift_query.count()
-        detected_drifts = drift_query.filter(DriftMetric.drift_detected.is_(True)).count()
-
-        open_alerts = alert_query.filter(Alert.status == "open").count()
-        acknowledged_alerts = alert_query.filter(Alert.status == "acknowledged").count()
-        resolved_alerts = alert_query.filter(Alert.status == "resolved").count()
+        resolved_alerts = monitoring_crud.count_alert_records(
+            self.db,
+            status="resolved",
+            model_name=model_name,
+            model_version=model_version,
+            created_after=window_start,
+            created_before=window_end,
+        )
 
         latest_evaluation_payload = None
         if latest_evaluation is not None:
@@ -628,17 +700,18 @@ class MonitoringService:
             "predictions": {
                 "total_predictions": total_predictions,
                 "total_errors": total_errors,
-                "error_rate": (total_errors / total_predictions) if total_predictions > 0 else 0.0,
+                "error_rate": _safe_divide(total_errors, total_predictions),
+                "avg_latency_ms": avg_latency_ms,
                 "last_prediction_at": (
-                    last_prediction.prediction_timestamp if last_prediction is not None else None
+                    last_prediction.prediction_timestamp
+                    if last_prediction is not None
+                    else None
                 ),
             },
             "drift": {
                 "total_drift_metrics": total_drift_metrics,
                 "detected_drifts": detected_drifts,
-                "drift_rate": (
-                    detected_drifts / total_drift_metrics if total_drift_metrics > 0 else 0.0
-                ),
+                "drift_rate": _safe_divide(detected_drifts, total_drift_metrics),
                 "last_drift_at": (
                     last_drift.computed_at if last_drift is not None else None
                 ),
@@ -683,6 +756,7 @@ class MonitoringService:
             "has_drift_metrics": drift.get("total_drift_metrics", 0) > 0,
             "has_latest_evaluation": latest_evaluation is not None,
             "open_alerts": alerts.get("open_alerts", 0),
+            "avg_latency_ms": predictions.get("avg_latency_ms"),
             "last_prediction_at": predictions.get("last_prediction_at"),
             "last_drift_at": drift.get("last_drift_at"),
             "latest_evaluation_at": (

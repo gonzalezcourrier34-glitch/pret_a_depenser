@@ -8,27 +8,31 @@ Ce module centralise l'orchestration métier des événements liés à l'infére
 
 Objectif
 --------
-Séparer la logique métier de journalisation de la couche CRUD
+Séparer la logique métier de journalisation des couches CRUD
 afin de garder des routes et services lisibles.
 
 Notes
 -----
-- Les commits peuvent être laissés à l'appelant pour garder le contrôle
-  transactionnel.
+- Les commits et rollbacks sont gérés par l'appelant.
 - En cas d'erreur de prédiction, la ligne est tout de même journalisée
   avec `prediction=0`, `score=0.0` et un `error_message` renseigné.
+- La persistance dans `feature_store_monitoring` passe par `crud.monitoring`.
+- La source journalisée par défaut correspond au CSV configuré dans l'application.
 """
 
 from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from app.core.config import APPLICATION_CSV
+from app.crud import monitoring as monitoring_crud
 from app.crud import prediction as prediction_crud
 from app.model.model_SQLalchemy import PredictionLog
 
@@ -133,6 +137,29 @@ def _to_json_compatible(value: Any) -> Any:
     return value
 
 
+def _resolve_source_table(source_table: str | None = None) -> str:
+    """
+    Résout la source logique à journaliser.
+
+    Si `source_table` est fourni, il est conservé.
+    Sinon, on utilise le nom du CSV configuré dans l'application.
+
+    Parameters
+    ----------
+    source_table : str | None
+        Source explicite éventuelle.
+
+    Returns
+    -------
+    str
+        Source logique à journaliser.
+    """
+    if source_table is not None and str(source_table).strip():
+        return str(source_table).strip()
+
+    return Path(APPLICATION_CSV).name
+
+
 def dataframe_row_to_feature_records(
     features_df: pd.DataFrame,
     *,
@@ -158,7 +185,7 @@ def dataframe_row_to_feature_records(
     client_id : int | None, optional
         Identifiant client.
     source_table : str | None, optional
-        Table ou source logique éventuelle.
+        Source logique éventuelle. Si absente, le CSV configuré est utilisé.
 
     Returns
     -------
@@ -181,6 +208,8 @@ def dataframe_row_to_feature_records(
             f"Nombre de lignes reçu : {len(features_df)}"
         )
 
+    resolved_source_table = _resolve_source_table(source_table)
+
     row = features_df.iloc[0].to_dict()
     records: list[dict[str, Any]] = []
 
@@ -196,7 +225,7 @@ def dataframe_row_to_feature_records(
                 "feature_name": str(feature_name),
                 "feature_value": None if value is None else str(value),
                 "feature_type": type(value).__name__ if value is not None else None,
-                "source_table": source_table,
+                "source_table": resolved_source_table,
             }
         )
 
@@ -348,7 +377,7 @@ class PredictionLoggingService:
 
         event_time = event_time or _utc_now()
 
-        prediction_crud.create_feature_store_records(
+        monitoring_crud.create_feature_store_records(
             self.db,
             records=feature_records,
             timestamp=event_time,
@@ -374,6 +403,10 @@ class PredictionLoggingService:
     ) -> None:
         """
         Orchestration complète de journalisation d'une prédiction réussie.
+
+        Notes
+        -----
+        Les commits et rollbacks sont gérés par l'appelant.
         """
         if not isinstance(features_df, pd.DataFrame):
             raise TypeError("`features_df` doit être un DataFrame pandas.")
@@ -385,6 +418,7 @@ class PredictionLoggingService:
             )
 
         event_time = _utc_now()
+        resolved_source_table = _resolve_source_table(source_table)
 
         feature_records = dataframe_row_to_feature_records(
             features_df,
@@ -392,7 +426,7 @@ class PredictionLoggingService:
             model_name=model_name,
             model_version=model_version,
             client_id=client_id,
-            source_table=source_table,
+            source_table=resolved_source_table,
         )
 
         self.log_prediction_features_snapshot(
@@ -414,6 +448,7 @@ class PredictionLoggingService:
             "model_name": model_name,
             "model_version": model_version,
             "latency_ms": None if latency_ms is None else float(latency_ms),
+            "source_csv": str(Path(APPLICATION_CSV).name),
         }
 
         self.log_prediction(
@@ -431,25 +466,3 @@ class PredictionLoggingService:
             error_message=None,
             event_time=event_time,
         )
-
-    def commit(self) -> None:
-        """
-        Valide la transaction courante.
-
-        Notes
-        -----
-        Un `flush()` explicite est effectué avant commit afin de faire
-        remonter les erreurs SQL le plus tôt possible.
-        """
-        try:
-            self.db.flush()
-            self.db.commit()
-        except Exception:
-            self.db.rollback()
-            raise
-
-    def rollback(self) -> None:
-        """
-        Annule la transaction courante.
-        """
-        self.db.rollback()
