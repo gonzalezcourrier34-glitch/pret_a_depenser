@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -35,25 +36,26 @@ class FakeEvidentlyService:
     def run_and_persist_data_drift_analysis(
         self,
         *,
-        model_name,
-        model_version,
-        reference_kind,
-        current_kind,
-        monitoring_dir,
-        max_rows,
-    ):
+        model_name: str,
+        model_version: str | None = None,
+        reference_kind: str,
+        current_kind: str,
+        monitoring_dir: str,
+        max_rows: int | None = None,
+    ) -> dict[str, Any]:
         return {
             "success": True,
-            "message": "ok",
+            "message": "Analyse Evidently exécutée avec succès.",
             "model_name": model_name,
-            "model_version": model_version,
+            "model_version": model_version or "v1",
             "reference_kind": reference_kind,
             "current_kind": current_kind,
-            "monitoring_dir": monitoring_dir,
-            "logged_metrics": 3,
-            "reference_rows": 100,
-            "current_rows": 80,
-            "max_rows": max_rows,
+            "logged_metrics": 12,
+            "html_report_path": str(Path(monitoring_dir) / "report.html"),
+            "reference_rows": 1000,
+            "current_rows": 900,
+            "analyzed_columns": ["AMT_CREDIT", "AMT_ANNUITY"],
+            "report": {"dataset_drift": False},
         }
 
 
@@ -64,30 +66,37 @@ class FakeMonitoringEvaluationService:
     def run_and_persist_monitoring_evaluation(
         self,
         *,
-        model_name,
-        model_version,
-        dataset_name,
-        window_start,
-        window_end,
-        beta,
-        cost_fn,
-        cost_fp,
-    ):
+        model_name: str,
+        model_version: str | None = None,
+        dataset_name: str,
+        window_start: datetime | None = None,
+        window_end: datetime | None = None,
+        beta: float = 2.0,
+        cost_fn: float = 10.0,
+        cost_fp: float = 1.0,
+    ) -> dict[str, Any]:
         return {
             "success": True,
-            "message": "ok",
+            "message": "Évaluation monitoring exécutée avec succès.",
             "model_name": model_name,
-            "model_version": model_version,
+            "model_version": model_version or "v1",
             "dataset_name": dataset_name,
             "logged_metrics": 1,
-            "sample_size": 50,
-            "matched_rows": 40,
-            "threshold_used": 0.5,
+            "sample_size": 120,
+            "matched_rows": 120,
+            "threshold_used": 0.0593,
             "window_start": window_start,
             "window_end": window_end,
-            "beta": beta,
-            "cost_fn": cost_fn,
-            "cost_fp": cost_fp,
+            "metrics": {
+                "roc_auc": 0.81,
+                "precision_score": 0.32,
+                "recall_score": 0.61,
+                "fbeta_score": 0.50,
+                "business_cost": 85.0,
+                "beta": beta,
+                "cost_fn": cost_fn,
+                "cost_fp": cost_fp,
+            },
         }
 
 
@@ -114,36 +123,39 @@ def test_parse_optional_datetime_none() -> None:
 
 
 def test_parse_optional_datetime_success() -> None:
-    result = ra._parse_optional_datetime("2026-04-23T10:30:00")
+    value = "2026-04-23T12:30:45"
+    result = ra._parse_optional_datetime(value)
 
     assert isinstance(result, datetime)
-    assert result.year == 2026
-    assert result.month == 4
-    assert result.day == 23
+    assert result == datetime(2026, 4, 23, 12, 30, 45)
 
 
 def test_parse_optional_datetime_invalid() -> None:
     with pytest.raises(Exception) as exc_info:
-        ra._parse_optional_datetime("not-a-date")
+        ra._parse_optional_datetime("pas-une-date")
 
     exc = exc_info.value
     assert getattr(exc, "status_code", None) == 400
     assert "Format de date invalide" in str(exc.detail)
 
 
-def test_resolve_monitoring_dir_explicit() -> None:
-    result = ra._resolve_monitoring_dir("custom/monitoring")
-    assert result == str(Path("custom/monitoring"))
+def test_resolve_monitoring_dir_with_argument() -> None:
+    result = ra._resolve_monitoring_dir("artifacts/monitoring_test")
+    assert result == str(Path("artifacts/monitoring_test"))
 
 
-def test_resolve_monitoring_dir_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ra, "MONITORING_DIR", Path("artifacts/monitoring"))
+def test_resolve_monitoring_dir_default() -> None:
     result = ra._resolve_monitoring_dir(None)
-    assert result == "artifacts/monitoring"
+    assert result == str(ra.MONITORING_DIR)
+
+
+def test_resolve_monitoring_dir_blank_uses_default() -> None:
+    result = ra._resolve_monitoring_dir("   ")
+    assert result == str(ra.MONITORING_DIR)
 
 
 # =============================================================================
-# Route Evidently
+# /analyse/evidently/run
 # =============================================================================
 
 def test_run_evidently_success(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,36 +167,64 @@ def test_run_evidently_success(monkeypatch: pytest.MonkeyPatch) -> None:
     response = client.post(
         "/analyse/evidently/run",
         params={
-            "model_name": "xgb",
+            "model_name": "credit_scoring_model",
             "model_version": "v1",
             "reference_kind": "transformed",
             "current_kind": "transformed",
-            "monitoring_dir": "tmp/monitoring",
-            "max_rows": 500,
+            "monitoring_dir": "artifacts/monitoring",
+            "max_rows": 5000,
         },
     )
 
     assert response.status_code == 200
     body = response.json()
-
     assert body["success"] is True
-    assert body["model_name"] == "xgb"
+    assert body["model_name"] == "credit_scoring_model"
     assert body["model_version"] == "v1"
     assert body["reference_kind"] == "transformed"
     assert body["current_kind"] == "transformed"
-    assert body["logged_metrics"] == 3
+    assert body["logged_metrics"] == 12
+    assert body["reference_rows"] == 1000
+    assert body["current_rows"] == 900
+    assert len(body["analyzed_columns"]) == 2
     assert fake_db.commits == 1
     assert fake_db.rollbacks == 0
 
 
-def test_run_evidently_rejects_mismatched_kinds() -> None:
+def test_run_evidently_uses_default_monitoring_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDB()
+    client = create_test_client(fake_db)
+
+    class InspectEvidentlyService(FakeEvidentlyService):
+        def run_and_persist_data_drift_analysis(self, **kwargs):
+            assert kwargs["monitoring_dir"] == str(ra.MONITORING_DIR)
+            return super().run_and_persist_data_drift_analysis(**kwargs)
+
+    monkeypatch.setattr(ra, "EvidentlyService", InspectEvidentlyService)
+
+    response = client.post(
+        "/analyse/evidently/run",
+        params={
+            "model_name": "credit_scoring_model",
+            "reference_kind": "transformed",
+            "current_kind": "transformed",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert fake_db.commits == 1
+    assert fake_db.rollbacks == 0
+
+
+def test_run_evidently_rejects_incompatible_kinds() -> None:
     fake_db = FakeDB()
     client = create_test_client(fake_db)
 
     response = client.post(
         "/analyse/evidently/run",
         params={
-            "model_name": "xgb",
+            "model_name": "credit_scoring_model",
             "reference_kind": "raw",
             "current_kind": "transformed",
         },
@@ -196,77 +236,36 @@ def test_run_evidently_rejects_mismatched_kinds() -> None:
     assert fake_db.rollbacks == 1
 
 
-def test_run_evidently_failed_result_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_evidently_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDB()
     client = create_test_client(fake_db)
 
-    class FailedEvidentlyService:
-        def __init__(self, db) -> None:
-            self.db = db
-
+    class BrokenEvidentlyService(FakeEvidentlyService):
         def run_and_persist_data_drift_analysis(self, **kwargs):
-            return {
-                "success": False,
-                "message": "no drift metrics logged",
-                "model_name": kwargs["model_name"],
-                "model_version": kwargs["model_version"],
-                "reference_kind": kwargs["reference_kind"],
-                "current_kind": kwargs["current_kind"],
-                "logged_metrics": 0,
-                "reference_rows": 10,
-                "current_rows": 8,
-                "max_rows": kwargs["max_rows"],
-            }
+            raise ValueError("Dataset de référence introuvable.")
 
-    monkeypatch.setattr(ra, "EvidentlyService", FailedEvidentlyService)
+    monkeypatch.setattr(ra, "EvidentlyService", BrokenEvidentlyService)
 
     response = client.post(
         "/analyse/evidently/run",
         params={
-            "model_name": "xgb",
-            "model_version": "v1",
+            "model_name": "credit_scoring_model",
+            "reference_kind": "transformed",
+            "current_kind": "transformed",
         },
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["success"] is False
-    assert fake_db.commits == 0
-    assert fake_db.rollbacks == 1
-
-
-def test_run_evidently_value_error_returns_400(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_db = FakeDB()
-    client = create_test_client(fake_db)
-
-    class ValueErrorEvidentlyService:
-        def __init__(self, db) -> None:
-            self.db = db
-
-        def run_and_persist_data_drift_analysis(self, **kwargs):
-            raise ValueError("monitoring directory invalid")
-
-    monkeypatch.setattr(ra, "EvidentlyService", ValueErrorEvidentlyService)
-
-    response = client.post(
-        "/analyse/evidently/run",
-        params={"model_name": "xgb"},
-    )
-
     assert response.status_code == 400
-    assert response.json()["detail"] == "monitoring directory invalid"
+    assert response.json()["detail"] == "Dataset de référence introuvable."
     assert fake_db.commits == 0
     assert fake_db.rollbacks == 1
 
 
-def test_run_evidently_unexpected_error_returns_500(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_evidently_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDB()
     client = create_test_client(fake_db)
 
-    class BrokenEvidentlyService:
-        def __init__(self, db) -> None:
-            self.db = db
-
+    class BrokenEvidentlyService(FakeEvidentlyService):
         def run_and_persist_data_drift_analysis(self, **kwargs):
             raise RuntimeError("boom")
 
@@ -274,7 +273,11 @@ def test_run_evidently_unexpected_error_returns_500(monkeypatch: pytest.MonkeyPa
 
     response = client.post(
         "/analyse/evidently/run",
-        params={"model_name": "xgb"},
+        params={
+            "model_name": "credit_scoring_model",
+            "reference_kind": "transformed",
+            "current_kind": "transformed",
+        },
     )
 
     assert response.status_code == 500
@@ -283,24 +286,77 @@ def test_run_evidently_unexpected_error_returns_500(monkeypatch: pytest.MonkeyPa
     assert fake_db.rollbacks == 1
 
 
+def test_run_evidently_failed_result_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDB()
+    client = create_test_client(fake_db)
+
+    class FailedResultEvidentlyService(FakeEvidentlyService):
+        def run_and_persist_data_drift_analysis(self, **kwargs):
+            return {
+                "success": False,
+                "message": "Analyse Evidently terminée sans succès.",
+                "model_name": kwargs["model_name"],
+                "model_version": kwargs.get("model_version") or "v1",
+                "reference_kind": kwargs["reference_kind"],
+                "current_kind": kwargs["current_kind"],
+                "logged_metrics": 0,
+                "html_report_path": None,
+                "reference_rows": 0,
+                "current_rows": 0,
+                "analyzed_columns": [],
+                "report": None,
+            }
+
+    monkeypatch.setattr(ra, "EvidentlyService", FailedResultEvidentlyService)
+
+    response = client.post(
+        "/analyse/evidently/run",
+        params={
+            "model_name": "credit_scoring_model",
+            "reference_kind": "transformed",
+            "current_kind": "transformed",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is False
+    assert body["logged_metrics"] == 0
+    assert fake_db.commits == 0
+    assert fake_db.rollbacks == 1
+
+
+def test_run_evidently_requires_model_name() -> None:
+    fake_db = FakeDB()
+    client = create_test_client(fake_db)
+
+    response = client.post("/analyse/evidently/run")
+
+    assert response.status_code == 422
+
+
 # =============================================================================
-# Route Monitoring Evaluation
+# /analyse/evaluation/run
 # =============================================================================
 
 def test_run_monitoring_evaluation_success(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDB()
     client = create_test_client(fake_db)
 
-    monkeypatch.setattr(ra, "MonitoringEvaluationService", FakeMonitoringEvaluationService)
+    monkeypatch.setattr(
+        ra,
+        "MonitoringEvaluationService",
+        FakeMonitoringEvaluationService,
+    )
 
     response = client.post(
         "/analyse/evaluation/run",
         params={
-            "model_name": "xgb",
+            "model_name": "credit_scoring_model",
             "model_version": "v1",
             "dataset_name": "scoring_prod",
             "window_start": "2026-04-01T00:00:00",
-            "window_end": "2026-04-23T00:00:00",
+            "window_end": "2026-04-20T00:00:00",
             "beta": 2.0,
             "cost_fn": 10.0,
             "cost_fp": 1.0,
@@ -309,28 +365,53 @@ def test_run_monitoring_evaluation_success(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert response.status_code == 200
     body = response.json()
-
     assert body["success"] is True
-    assert body["model_name"] == "xgb"
+    assert body["model_name"] == "credit_scoring_model"
     assert body["model_version"] == "v1"
     assert body["dataset_name"] == "scoring_prod"
     assert body["logged_metrics"] == 1
-    assert body["sample_size"] == 50
-    assert body["matched_rows"] == 40
-    assert body["threshold_used"] == 0.5
+    assert body["sample_size"] == 120
+    assert body["matched_rows"] == 120
+    assert body["threshold_used"] == 0.0593
+    assert body["metrics"]["roc_auc"] == 0.81
     assert fake_db.commits == 1
     assert fake_db.rollbacks == 0
 
 
-def test_run_monitoring_evaluation_invalid_window_start() -> None:
+def test_run_monitoring_evaluation_without_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDB()
+    client = create_test_client(fake_db)
+
+    monkeypatch.setattr(
+        ra,
+        "MonitoringEvaluationService",
+        FakeMonitoringEvaluationService,
+    )
+
+    response = client.post(
+        "/analyse/evaluation/run",
+        params={
+            "model_name": "credit_scoring_model",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["dataset_name"] == "scoring_prod"
+    assert fake_db.commits == 1
+    assert fake_db.rollbacks == 0
+
+
+def test_run_monitoring_evaluation_invalid_window_start_format() -> None:
     fake_db = FakeDB()
     client = create_test_client(fake_db)
 
     response = client.post(
         "/analyse/evaluation/run",
         params={
-            "model_name": "xgb",
-            "window_start": "not-a-date",
+            "model_name": "credit_scoring_model",
+            "window_start": "date-invalide",
         },
     )
 
@@ -340,83 +421,56 @@ def test_run_monitoring_evaluation_invalid_window_start() -> None:
     assert fake_db.rollbacks == 0
 
 
-def test_run_monitoring_evaluation_failed_result_rolls_back(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_run_monitoring_evaluation_invalid_window_end_format() -> None:
     fake_db = FakeDB()
     client = create_test_client(fake_db)
-
-    class FailedMonitoringEvaluationService:
-        def __init__(self, db) -> None:
-            self.db = db
-
-        def run_and_persist_monitoring_evaluation(self, **kwargs):
-            return {
-                "success": False,
-                "message": "no matched rows",
-                "model_name": kwargs["model_name"],
-                "model_version": kwargs["model_version"],
-                "dataset_name": kwargs["dataset_name"],
-                "logged_metrics": 0,
-                "sample_size": 0,
-                "matched_rows": 0,
-                "threshold_used": None,
-            }
-
-    monkeypatch.setattr(ra, "MonitoringEvaluationService", FailedMonitoringEvaluationService)
 
     response = client.post(
         "/analyse/evaluation/run",
-        params={"model_name": "xgb"},
+        params={
+            "model_name": "credit_scoring_model",
+            "window_end": "date-invalide",
+        },
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["success"] is False
+    assert response.status_code == 400
+    assert "Format de date invalide" in response.json()["detail"]
     assert fake_db.commits == 0
-    assert fake_db.rollbacks == 1
+    assert fake_db.rollbacks == 0
 
 
-def test_run_monitoring_evaluation_value_error_returns_400(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_run_monitoring_evaluation_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDB()
     client = create_test_client(fake_db)
 
-    class ValueErrorMonitoringEvaluationService:
-        def __init__(self, db) -> None:
-            self.db = db
-
+    class BrokenMonitoringEvaluationService(FakeMonitoringEvaluationService):
         def run_and_persist_monitoring_evaluation(self, **kwargs):
-            raise ValueError("ground truth missing")
+            raise ValueError("Aucune vérité terrain disponible.")
 
     monkeypatch.setattr(
         ra,
         "MonitoringEvaluationService",
-        ValueErrorMonitoringEvaluationService,
+        BrokenMonitoringEvaluationService,
     )
 
     response = client.post(
         "/analyse/evaluation/run",
-        params={"model_name": "xgb"},
+        params={
+            "model_name": "credit_scoring_model",
+        },
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "ground truth missing"
+    assert response.json()["detail"] == "Aucune vérité terrain disponible."
     assert fake_db.commits == 0
     assert fake_db.rollbacks == 1
 
 
-def test_run_monitoring_evaluation_unexpected_error_returns_500(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_run_monitoring_evaluation_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDB()
     client = create_test_client(fake_db)
 
-    class BrokenMonitoringEvaluationService:
-        def __init__(self, db) -> None:
-            self.db = db
-
+    class BrokenMonitoringEvaluationService(FakeMonitoringEvaluationService):
         def run_and_persist_monitoring_evaluation(self, **kwargs):
             raise RuntimeError("boom")
 
@@ -428,10 +482,65 @@ def test_run_monitoring_evaluation_unexpected_error_returns_500(
 
     response = client.post(
         "/analyse/evaluation/run",
-        params={"model_name": "xgb"},
+        params={
+            "model_name": "credit_scoring_model",
+        },
     )
 
     assert response.status_code == 500
     assert response.json()["detail"] == "Erreur interne lors de l'évaluation monitoring."
     assert fake_db.commits == 0
     assert fake_db.rollbacks == 1
+
+
+def test_run_monitoring_evaluation_failed_result_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_db = FakeDB()
+    client = create_test_client(fake_db)
+
+    class FailedResultMonitoringEvaluationService(FakeMonitoringEvaluationService):
+        def run_and_persist_monitoring_evaluation(self, **kwargs):
+            return {
+                "success": False,
+                "message": "Évaluation monitoring terminée sans succès.",
+                "model_name": kwargs["model_name"],
+                "model_version": kwargs.get("model_version") or "v1",
+                "dataset_name": kwargs["dataset_name"],
+                "logged_metrics": 0,
+                "sample_size": 0,
+                "matched_rows": 0,
+                "threshold_used": None,
+                "window_start": kwargs.get("window_start"),
+                "window_end": kwargs.get("window_end"),
+                "metrics": {},
+            }
+
+    monkeypatch.setattr(
+        ra,
+        "MonitoringEvaluationService",
+        FailedResultMonitoringEvaluationService,
+    )
+
+    response = client.post(
+        "/analyse/evaluation/run",
+        params={
+            "model_name": "credit_scoring_model",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is False
+    assert body["logged_metrics"] == 0
+    assert fake_db.commits == 0
+    assert fake_db.rollbacks == 1
+
+
+def test_run_monitoring_evaluation_requires_model_name() -> None:
+    fake_db = FakeDB()
+    client = create_test_client(fake_db)
+
+    response = client.post("/analyse/evaluation/run")
+
+    assert response.status_code == 422

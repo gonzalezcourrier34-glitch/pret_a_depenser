@@ -378,11 +378,6 @@ def load_shared_data(limit: int) -> dict[str, Any]:
         )
     )
 
-    st.write("resolved_model_name =", resolved_model_name)
-    st.write("resolved_model_version =", resolved_model_version)
-    st.write("model_registry_df.shape =", model_registry_df.shape)
-    st.write("active_model_df.shape =", active_model_df.shape)
-
     evaluation_metrics_df = safe_dataframe(
         get_evaluation_metrics(
             base_url=API_URL,

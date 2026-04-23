@@ -33,6 +33,7 @@ Notes
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import text
@@ -71,6 +72,25 @@ router = APIRouter(
     prefix="/predict",
     tags=["Predict"],
 )
+
+
+# =============================================================================
+# Helpers locaux
+# =============================================================================
+
+def _normalize_features_payload(features: dict[str, Any]) -> dict[str, Any]:
+    """
+    Normalise les features reçues depuis le schéma Pydantic.
+
+    Notes
+    -----
+    Dans `PredictRequest`, `features` est déjà typé comme `dict[str, Any]`.
+    Il ne faut donc pas appeler `.model_dump()` dessus.
+    """
+    if not isinstance(features, dict):
+        raise ValueError("Le champ `features` doit être un dictionnaire.")
+
+    return dict(features)
 
 
 # =============================================================================
@@ -196,7 +216,7 @@ def predict(
     )
 
     try:
-        features = payload.features.model_dump(by_alias=True)
+        features = _normalize_features_payload(payload.features)
 
         result = make_prediction(
             features=features,
@@ -338,7 +358,7 @@ def predict_batch(
         normalized_payloads = [
             {
                 "client_id": item.SK_ID_CURR,
-                "features": item.features.model_dump(by_alias=True),
+                "features": _normalize_features_payload(item.features),
             }
             for item in payloads
         ]
@@ -349,6 +369,11 @@ def predict_batch(
             source_table="api_batch_request",
         )
 
+        if not isinstance(result, dict):
+            raise TypeError(
+                "Le service batch devait retourner un dictionnaire."
+            )
+
         db.commit()
 
         logger.info(
@@ -357,7 +382,8 @@ def predict_batch(
                 "extra_data": {
                     "event": "predict_batch_success",
                     "batch_size": len(payloads),
-                    "count": result.get("count"),
+                    "success_count": result.get("success_count"),
+                    "error_count": result.get("error_count"),
                     "source_table": "api_batch_request",
                 }
             },
@@ -744,6 +770,11 @@ def simulate_real_sample_predictions(
             source_table="simulate_real_sample",
         )
 
+        if not isinstance(result, dict):
+            raise TypeError(
+                "Le service de simulation réelle devait retourner un dictionnaire."
+            )
+
         db.commit()
 
         logger.info(
@@ -753,7 +784,8 @@ def simulate_real_sample_predictions(
                     "event": "predict_simulate_real_success",
                     "limit": limit,
                     "random_seed": random_seed,
-                    "count": result.get("count"),
+                    "success_count": result.get("success_count"),
+                    "error_count": result.get("error_count"),
                     "source_table": "simulate_real_sample",
                 }
             },
@@ -868,6 +900,11 @@ def simulate_random_predictions(
             source_table="simulate_random",
         )
 
+        if not isinstance(result, dict):
+            raise TypeError(
+                "Le service de simulation aléatoire devait retourner un dictionnaire."
+            )
+
         db.commit()
 
         logger.info(
@@ -876,7 +913,8 @@ def simulate_random_predictions(
                 "extra_data": {
                     "event": "predict_simulate_random_success",
                     "limit": limit,
-                    "count": result.get("count"),
+                    "success_count": result.get("success_count"),
+                    "error_count": result.get("error_count"),
                     "source_table": "simulate_random",
                 }
             },

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -14,6 +14,17 @@ from app.api import route_monitoring as rm
 
 
 # =============================================================================
+# Helpers temporels
+# =============================================================================
+
+def _utc_now() -> datetime:
+    """
+    Retourne un datetime timezone-aware pour les tests.
+    """
+    return datetime.now(timezone.utc)
+
+
+# =============================================================================
 # Faux objets
 # =============================================================================
 
@@ -21,7 +32,7 @@ class FakeDB:
     def __init__(self) -> None:
         self.commits = 0
         self.rollbacks = 0
-        self.refreshed = []
+        self.refreshed: list[Any] = []
 
     def commit(self) -> None:
         self.commits += 1
@@ -37,7 +48,7 @@ class FakeDB:
 class FakeModel:
     model_name: str = "xgb"
     model_version: str = "v1"
-    stage: str = "Production"
+    stage: str = "production"
     run_id: str | None = "run_1"
     source_path: str | None = "artifacts/model.joblib"
     training_data_version: str | None = "train_v1"
@@ -46,7 +57,7 @@ class FakeModel:
     metrics: dict[str, Any] | None = None
     deployed_at: datetime | None = None
     is_active: bool = True
-    created_at: datetime | None = None
+    created_at: datetime = field(default_factory=_utc_now)
 
 
 @dataclass
@@ -61,7 +72,7 @@ class FakeAlert:
     message: str = "Feature drift detected"
     context: dict[str, Any] | None = None
     status: str = "open"
-    created_at: datetime | None = None
+    created_at: datetime = field(default_factory=_utc_now)
     acknowledged_at: datetime | None = None
     resolved_at: datetime | None = None
 
@@ -81,7 +92,7 @@ class FakeMonitoringService:
                     "id": 1,
                     "model_name": "xgb",
                     "model_version": "v1",
-                    "stage": "Production",
+                    "stage": "production",
                     "run_id": "run_1",
                     "source_path": "artifacts/model_v1.joblib",
                     "training_data_version": "train_v1",
@@ -90,13 +101,13 @@ class FakeMonitoringService:
                     "metrics": {"roc_auc": 0.81},
                     "deployed_at": None,
                     "is_active": True,
-                    "created_at": None,
+                    "created_at": _utc_now(),
                 },
                 {
                     "id": 2,
                     "model_name": "xgb",
                     "model_version": "v2",
-                    "stage": "Staging",
+                    "stage": "staging",
                     "run_id": "run_2",
                     "source_path": "artifacts/model_v2.joblib",
                     "training_data_version": "train_v2",
@@ -105,7 +116,7 @@ class FakeMonitoringService:
                     "metrics": {"roc_auc": 0.83},
                     "deployed_at": None,
                     "is_active": False,
-                    "created_at": None,
+                    "created_at": _utc_now(),
                 },
             ],
         }
@@ -138,7 +149,7 @@ class FakeMonitoringService:
                     "threshold_value": 0.10,
                     "drift_detected": True,
                     "details": {"bucket_count": 10},
-                    "computed_at": None,
+                    "computed_at": _utc_now(),
                 }
             ],
         }
@@ -166,7 +177,7 @@ class FakeMonitoringService:
                     "fn": 5,
                     "tp": 20,
                     "sample_size": 135,
-                    "computed_at": None,
+                    "computed_at": _utc_now(),
                 }
             ],
         }
@@ -185,7 +196,7 @@ class FakeMonitoringService:
                     "feature_value": "50000.0",
                     "feature_type": "float",
                     "source_table": "prediction_features_snapshot",
-                    "snapshot_timestamp": None,
+                    "snapshot_timestamp": _utc_now(),
                 }
             ],
         }
@@ -194,10 +205,19 @@ class FakeMonitoringService:
         return [FakeAlert(id=1), FakeAlert(id=2, status="acknowledged")]
 
     def acknowledge_alert(self, alert_id: int):
-        return FakeAlert(id=alert_id, status="acknowledged")
+        return FakeAlert(
+            id=alert_id,
+            status="acknowledged",
+            acknowledged_at=_utc_now(),
+        )
 
     def resolve_alert(self, alert_id: int):
-        return FakeAlert(id=alert_id, status="resolved")
+        return FakeAlert(
+            id=alert_id,
+            status="resolved",
+            acknowledged_at=_utc_now(),
+            resolved_at=_utc_now(),
+        )
 
     def get_monitoring_summary(self, **kwargs):
         return {
@@ -296,7 +316,7 @@ def test_serialize_active_model() -> None:
 
     assert result.model_name == "xgb"
     assert result.model_version == "v2"
-    assert result.stage == "Production"
+    assert result.stage == "production"
 
 
 def test_serialize_alert() -> None:
@@ -375,6 +395,7 @@ def test_get_models_success(monkeypatch: pytest.MonkeyPatch) -> None:
     body = response.json()
     assert body["count"] == 2
     assert body["items"][0]["model_name"] == "xgb"
+    assert body["items"][0]["id"] == 1
 
 
 def test_get_models_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,7 +429,7 @@ def test_register_model_version_success(monkeypatch: pytest.MonkeyPatch) -> None
         json={
             "model_name": "xgb",
             "model_version": "v3",
-            "stage": "Production",
+            "stage": "production",
             "run_id": "run_3",
             "source_path": "artifacts/model_v3.joblib",
             "training_data_version": "train_v3",
@@ -424,7 +445,7 @@ def test_register_model_version_success(monkeypatch: pytest.MonkeyPatch) -> None
     body = response.json()
     assert body["model_name"] == "xgb"
     assert body["model_version"] == "v3"
-    assert body["stage"] == "Production"
+    assert body["stage"] == "production"
     assert body["is_active"] is True
     assert fake_db.commits == 1
     assert fake_db.rollbacks == 0
@@ -445,7 +466,7 @@ def test_register_model_version_error_rolls_back(monkeypatch: pytest.MonkeyPatch
         json={
             "model_name": "xgb",
             "model_version": "v3",
-            "stage": "Production",
+            "stage": "production",
             "is_active": True,
         },
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import count
 from typing import Any
 
 import pandas as pd
@@ -78,6 +79,14 @@ def sample_df() -> pd.DataFrame:
             {"AMT_CREDIT": 20000.0, "AMT_INCOME_TOTAL": 50000.0},
         ]
     )
+
+
+def build_perf_counter(step: float = 0.1):
+    """
+    Retourne une fonction perf_counter robuste pour les tests.
+    """
+    values = count(start=1.0, step=step)
+    return lambda: next(values)
 
 
 # =============================================================================
@@ -163,6 +172,15 @@ def test_validate_ground_truth_inputs_ok() -> None:
     )
 
 
+def test_validate_ground_truth_inputs_ok_with_observed_at_none() -> None:
+    ps._validate_ground_truth_inputs(
+        request_id="req_1",
+        client_id=None,
+        true_label=1,
+        observed_at=None,
+    )
+
+
 def test_validate_ground_truth_inputs_requires_identifier() -> None:
     with pytest.raises(ValueError, match="Au moins un identifiant doit être fourni"):
         ps._validate_ground_truth_inputs(
@@ -194,10 +212,30 @@ def test_validate_ground_truth_inputs_observed_at_invalid() -> None:
 
 
 # =============================================================================
+# Helpers techniques
+# =============================================================================
+
+def test_safe_request_id_returns_string() -> None:
+    result = ps._safe_request_id()
+    assert isinstance(result, str)
+    assert result
+
+
+def test_safe_request_id_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ps.uuid, "uuid4", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    result = ps._safe_request_id()
+    assert isinstance(result, str)
+    assert result.startswith("fallback-")
+
+
+# =============================================================================
 # Helpers modèle
 # =============================================================================
 
-def test_predict_scores_success(monkeypatch: pytest.MonkeyPatch, sample_df: pd.DataFrame) -> None:
+def test_predict_scores_success(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_df: pd.DataFrame,
+) -> None:
     monkeypatch.setattr(ps, "get_model", lambda: DummyModel([[0.2, 0.8], [0.7, 0.3]]))
 
     scores = ps._predict_scores(sample_df)
@@ -225,7 +263,10 @@ def test_predict_scores_raises_if_invalid_predict_proba_output(
         ps._predict_scores(sample_df)
 
 
-def test_predict_raw_success(monkeypatch: pytest.MonkeyPatch, sample_features: dict[str, Any]) -> None:
+def test_predict_raw_success(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_features: dict[str, Any],
+) -> None:
     monkeypatch.setattr(ps, "get_threshold", lambda: 0.5)
     monkeypatch.setattr(ps, "_predict_scores", lambda df: pd.Series([0.9], index=df.index))
 
@@ -240,7 +281,10 @@ def test_predict_raw_success(monkeypatch: pytest.MonkeyPatch, sample_features: d
 # Cache / extraction helpers
 # =============================================================================
 
-def test_extract_application_df_from_dataframe(sample_df: pd.DataFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_extract_application_df_from_dataframe(
+    sample_df: pd.DataFrame,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(ps, "get_data_cache", lambda: sample_df)
 
     result = ps._extract_application_df()
@@ -295,7 +339,7 @@ def test_extract_existing_client_ids_no_usable_ids() -> None:
         ps.extract_existing_client_ids(df)
 
 
-def test_get_random_existing_client_ids_success(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_random_existing_client_ids_success() -> None:
     df = pd.DataFrame({"SK_ID_CURR": [1, 2, 3, 4, 5]})
 
     result = ps.get_random_existing_client_ids(df, limit=3, random_seed=42)
@@ -501,7 +545,10 @@ def test_build_error_item() -> None:
 # Single prediction public API
 # =============================================================================
 
-def test_make_prediction_without_db(monkeypatch: pytest.MonkeyPatch, sample_features: dict[str, Any]) -> None:
+def test_make_prediction_without_db(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_features: dict[str, Any],
+) -> None:
     monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.88, 0.5))
 
     result = ps.make_prediction(sample_features, db=None)
@@ -518,8 +565,8 @@ def test_make_prediction_with_db_success(
 
     monkeypatch.setattr(ps, "PredictionLoggingService", lambda db: fake_logger)
     monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.91, 0.5))
-    monkeypatch.setattr(ps.uuid, "uuid4", lambda: "req_uuid")
-    monkeypatch.setattr(ps.time, "perf_counter", lambda: 1.0)
+    monkeypatch.setattr(ps, "_safe_request_id", lambda: "req_uuid")
+    monkeypatch.setattr(ps.time, "perf_counter", build_perf_counter())
 
     result = ps.make_prediction(sample_features, client_id=100001, db=fake_db)
 
@@ -540,12 +587,10 @@ def test_make_prediction_with_db_error_logs_and_raises(
     def raise_predict(features):
         raise RuntimeError("predict failed")
 
-    perf = iter([1.0, 1.1])
-
     monkeypatch.setattr(ps, "PredictionLoggingService", lambda db: fake_logger)
     monkeypatch.setattr(ps, "_predict_raw", raise_predict)
-    monkeypatch.setattr(ps.uuid, "uuid4", lambda: "req_uuid")
-    monkeypatch.setattr(ps.time, "perf_counter", lambda: next(perf))
+    monkeypatch.setattr(ps, "_safe_request_id", lambda: "req_uuid")
+    monkeypatch.setattr(ps.time, "perf_counter", build_perf_counter())
 
     with pytest.raises(RuntimeError, match="predict failed"):
         ps.make_prediction(sample_features, client_id=123, db=fake_db)
@@ -559,7 +604,10 @@ def test_make_prediction_from_client_id(monkeypatch: pytest.MonkeyPatch, fake_db
     monkeypatch.setattr(
         ps,
         "make_prediction",
-        lambda features, client_id=None, db=None, source_table="x": {"prediction": 1, "client_id": client_id},
+        lambda features, client_id=None, db=None, source_table="x": {
+            "prediction": 1,
+            "client_id": client_id,
+        },
     )
 
     result = ps.make_prediction_from_client_id(10, db=fake_db)
@@ -607,7 +655,10 @@ def test_make_batch_prediction(monkeypatch: pytest.MonkeyPatch, sample_df: pd.Da
     assert "threshold_used" in result.columns
 
 
-def test_run_batch_prediction_success_and_error(monkeypatch: pytest.MonkeyPatch, fake_db) -> None:
+def test_run_batch_prediction_success_and_error(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_db,
+) -> None:
     fake_logger = FakePredictionLoggingService()
 
     def fake_predict_raw(features):
@@ -615,12 +666,10 @@ def test_run_batch_prediction_success_and_error(monkeypatch: pytest.MonkeyPatch,
             raise RuntimeError("bad row")
         return (1, 0.9, 0.5)
 
-    perf = iter([1.0, 1.1, 2.0, 2.2, 3.0])
-
     monkeypatch.setattr(ps, "PredictionLoggingService", lambda db: fake_logger)
     monkeypatch.setattr(ps, "_predict_raw", fake_predict_raw)
-    monkeypatch.setattr(ps.uuid, "uuid4", lambda: "req_id")
-    monkeypatch.setattr(ps.time, "perf_counter", lambda: next(perf))
+    monkeypatch.setattr(ps, "_safe_request_id", lambda: "req_id")
+    monkeypatch.setattr(ps.time, "perf_counter", build_perf_counter())
 
     payloads = [
         {"client_id": 1, "features": {"A": 1}},
@@ -638,13 +687,15 @@ def test_run_batch_prediction_success_and_error(monkeypatch: pytest.MonkeyPatch,
     assert len(fake_logger.logged_errors) == 1
 
 
-def test_run_batch_prediction_raises_if_features_not_dict(monkeypatch: pytest.MonkeyPatch, fake_db) -> None:
+def test_run_batch_prediction_raises_if_features_not_dict(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_db,
+) -> None:
     fake_logger = FakePredictionLoggingService()
-    perf = iter([1.0, 1.1, 2.0])
 
     monkeypatch.setattr(ps, "PredictionLoggingService", lambda db: fake_logger)
-    monkeypatch.setattr(ps.uuid, "uuid4", lambda: "req_id")
-    monkeypatch.setattr(ps.time, "perf_counter", lambda: next(perf))
+    monkeypatch.setattr(ps, "_safe_request_id", lambda: "req_id")
+    monkeypatch.setattr(ps.time, "perf_counter", build_perf_counter())
 
     result = ps.run_batch_prediction(
         [{"client_id": 1, "features": "not_a_dict"}],
@@ -657,7 +708,10 @@ def test_run_batch_prediction_raises_if_features_not_dict(monkeypatch: pytest.Mo
     assert result["items"][0]["status"] == "error"
 
 
-def test_predict_batch_from_client_ids_success_and_error(monkeypatch: pytest.MonkeyPatch, fake_db) -> None:
+def test_predict_batch_from_client_ids_success_and_error(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_db,
+) -> None:
     fake_logger = FakePredictionLoggingService()
 
     def fake_get_features(client_id):
@@ -668,10 +722,8 @@ def test_predict_batch_from_client_ids_success_and_error(monkeypatch: pytest.Mon
     monkeypatch.setattr(ps, "_get_features_for_client", fake_get_features)
     monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.8, 0.5))
     monkeypatch.setattr(ps, "PredictionLoggingService", lambda db: fake_logger)
-    monkeypatch.setattr(ps.uuid, "uuid4", lambda: "req_id")
-
-    perf = iter([1.0, 1.1, 2.0, 2.1, 3.0])
-    monkeypatch.setattr(ps.time, "perf_counter", lambda: next(perf))
+    monkeypatch.setattr(ps, "_safe_request_id", lambda: "req_id")
+    monkeypatch.setattr(ps.time, "perf_counter", build_perf_counter())
 
     result = ps.predict_batch_from_client_ids([1, 2], db=fake_db, source_table="cache")
 
@@ -687,7 +739,11 @@ def test_predict_batch_from_client_ids_success_and_error(monkeypatch: pytest.Mon
 # =============================================================================
 
 def test_run_real_client_simulation(monkeypatch: pytest.MonkeyPatch, fake_db) -> None:
-    monkeypatch.setattr(ps, "_load_client_source_dataframe", lambda: pd.DataFrame({"SK_ID_CURR": [1, 2, 3]}))
+    monkeypatch.setattr(
+        ps,
+        "_load_client_source_dataframe",
+        lambda: pd.DataFrame({"SK_ID_CURR": [1, 2, 3]}),
+    )
     monkeypatch.setattr(ps, "get_random_existing_client_ids", lambda **kwargs: [1, 2])
     monkeypatch.setattr(
         ps,
@@ -711,8 +767,15 @@ def test_run_real_client_simulation(monkeypatch: pytest.MonkeyPatch, fake_db) ->
     assert result["success_count"] == 2
 
 
-def test_run_real_client_simulation_raises_if_source_empty(monkeypatch: pytest.MonkeyPatch, fake_db) -> None:
-    monkeypatch.setattr(ps, "_load_client_source_dataframe", lambda: pd.DataFrame({"SK_ID_CURR": []}))
+def test_run_real_client_simulation_raises_if_source_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_db,
+) -> None:
+    monkeypatch.setattr(
+        ps,
+        "_load_client_source_dataframe",
+        lambda: pd.DataFrame({"SK_ID_CURR": []}),
+    )
 
     with pytest.raises(ValueError, match="Aucune source client disponible"):
         ps.run_real_client_simulation(
@@ -723,7 +786,10 @@ def test_run_real_client_simulation_raises_if_source_empty(monkeypatch: pytest.M
         )
 
 
-def test_run_random_feature_simulation_success_and_error(monkeypatch: pytest.MonkeyPatch, fake_db) -> None:
+def test_run_random_feature_simulation_success_and_error(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_db,
+) -> None:
     fake_logger = FakePredictionLoggingService()
 
     generated_rows = [
@@ -744,10 +810,8 @@ def test_run_random_feature_simulation_success_and_error(monkeypatch: pytest.Mon
     )
     monkeypatch.setattr(ps, "_predict_raw", fake_predict_raw)
     monkeypatch.setattr(ps, "PredictionLoggingService", lambda db: fake_logger)
-    monkeypatch.setattr(ps.uuid, "uuid4", lambda: "req_id")
-
-    perf = iter([1.0, 1.1, 2.0, 2.2, 3.0])
-    monkeypatch.setattr(ps.time, "perf_counter", lambda: next(perf))
+    monkeypatch.setattr(ps, "_safe_request_id", lambda: "req_id")
+    monkeypatch.setattr(ps.time, "perf_counter", build_perf_counter())
 
     result = ps.run_random_feature_simulation(
         limit=2,
@@ -812,6 +876,40 @@ def test_create_ground_truth_label(monkeypatch: pytest.MonkeyPatch, fake_db) -> 
     assert result["client_id"] == 100001
     assert result["true_label"] == 1
     assert result["message"] == "Ground truth enregistré avec succès."
+
+
+def test_create_ground_truth_label_with_observed_at_none(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_db,
+) -> None:
+    monkeypatch.setattr(
+        ps.prediction_crud,
+        "create_ground_truth_label",
+        lambda db, request_id, client_id, true_label, label_source, observed_at, notes: FakeGroundTruth(
+            id=2,
+            request_id=request_id,
+            client_id=client_id,
+            true_label=true_label,
+            label_source=label_source,
+            observed_at=observed_at,
+            notes=notes,
+        ),
+    )
+
+    result = ps.create_ground_truth_label(
+        db=fake_db,
+        request_id="req_2",
+        client_id=None,
+        true_label=0,
+        label_source="manual",
+        observed_at=None,
+        notes=None,
+    )
+
+    assert result["id"] == 2
+    assert result["request_id"] == "req_2"
+    assert result["true_label"] == 0
+    assert isinstance(result["observed_at"], datetime)
 
 
 # =============================================================================

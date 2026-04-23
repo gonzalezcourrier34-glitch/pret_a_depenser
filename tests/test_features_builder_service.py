@@ -11,6 +11,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 
 from app.services import features_builder_service as fbs
+import app.services.loader_services.model_loading_service as model_loading_service
 
 
 # =============================================================================
@@ -19,6 +20,7 @@ from app.services import features_builder_service as fbs
 
 class FakeTransformerPipeline(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
+        self.is_fitted_ = True
         return self
 
     def transform(self, X):
@@ -30,6 +32,7 @@ class FakeTransformerPipeline(BaseEstimator, TransformerMixin):
 
 class FakeTransformerNoNames(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
+        self.is_fitted_ = True
         return self
 
     def transform(self, X):
@@ -38,6 +41,7 @@ class FakeTransformerNoNames(BaseEstimator, TransformerMixin):
 
 class FakeEstimator(BaseEstimator):
     def fit(self, X, y=None):
+        self.is_fitted_ = True
         return self
 
 
@@ -49,6 +53,9 @@ class FakePipeline(Pipeline):
                 ("model", FakeEstimator()),
             ]
         )
+        X_dummy = pd.DataFrame({"f1": [0.0, 1.0], "f2": [0.0, 1.0]})
+        y_dummy = [0, 1]
+        self.fit(X_dummy, y_dummy)
 
 
 class FakePipelineNoNames(Pipeline):
@@ -59,12 +66,17 @@ class FakePipelineNoNames(Pipeline):
                 ("model", FakeEstimator()),
             ]
         )
+        X_dummy = pd.DataFrame({"f1": [0.0, 1.0], "f2": [0.0, 1.0]})
+        y_dummy = [0, 1]
+        self.fit(X_dummy, y_dummy)
 
 
 class FakeShortPipeline(Pipeline):
     def __init__(self):
         super().__init__([("only_step", FakeEstimator())])
-
+        X_dummy = pd.DataFrame({"f1": [0.0, 1.0]})
+        y_dummy = [0, 1]
+        self.fit(X_dummy, y_dummy)
 
 # =============================================================================
 # Fixtures utilitaires
@@ -629,12 +641,7 @@ def test_build_transformed_features_from_loaded_data_success_with_feature_names(
         "build_features_from_loaded_data",
         lambda **kwargs: raw_features.copy(),
     )
-
-    fake_model_module = types.ModuleType(
-        "app.services.loader_services.model_loading_service"
-    )
-    fake_model_module.get_model = lambda: FakePipeline()
-    sys.modules["app.services.loader_services.model_loading_service"] = fake_model_module
+    monkeypatch.setattr(model_loading_service, "get_model", lambda: FakePipeline())
 
     result = fbs.build_transformed_features_from_loaded_data(
         application_df=sample_application_df
@@ -642,6 +649,8 @@ def test_build_transformed_features_from_loaded_data_success_with_feature_names(
 
     assert list(result.columns) == ["feat_a", "feat_b"]
     assert result.shape == (2, 2)
+    assert result.iloc[0].tolist() == [1.0, 2.0]
+    assert result.iloc[1].tolist() == [3.0, 4.0]
 
 
 def test_build_transformed_features_from_loaded_data_fallback_feature_names(
@@ -660,12 +669,7 @@ def test_build_transformed_features_from_loaded_data_fallback_feature_names(
         "build_features_from_loaded_data",
         lambda **kwargs: raw_features.copy(),
     )
-
-    fake_model_module = types.ModuleType(
-        "app.services.loader_services.model_loading_service"
-    )
-    fake_model_module.get_model = lambda: FakePipelineNoNames()
-    sys.modules["app.services.loader_services.model_loading_service"] = fake_model_module
+    monkeypatch.setattr(model_loading_service, "get_model", lambda: FakePipelineNoNames())
 
     result = fbs.build_transformed_features_from_loaded_data(
         application_df=sample_application_df
@@ -673,6 +677,8 @@ def test_build_transformed_features_from_loaded_data_fallback_feature_names(
 
     assert list(result.columns) == ["feature_0", "feature_1", "feature_2"]
     assert result.shape == (2, 3)
+    assert result.iloc[0].tolist() == [1.0, 0.0, 7.0]
+    assert result.iloc[1].tolist() == [1.0, 0.0, 7.0]
 
 
 def test_build_transformed_features_from_loaded_data_raises_if_model_not_pipeline(
@@ -684,12 +690,7 @@ def test_build_transformed_features_from_loaded_data_raises_if_model_not_pipelin
         "build_features_from_loaded_data",
         lambda **kwargs: pd.DataFrame({"f1": [1.0]}),
     )
-
-    fake_model_module = types.ModuleType(
-        "app.services.loader_services.model_loading_service"
-    )
-    fake_model_module.get_model = lambda: "not_a_pipeline"
-    sys.modules["app.services.loader_services.model_loading_service"] = fake_model_module
+    monkeypatch.setattr(model_loading_service, "get_model", lambda: "not_a_pipeline")
 
     with pytest.raises(TypeError, match="n'est pas un Pipeline sklearn"):
         fbs.build_transformed_features_from_loaded_data(
@@ -706,12 +707,7 @@ def test_build_transformed_features_from_loaded_data_raises_if_pipeline_too_shor
         "build_features_from_loaded_data",
         lambda **kwargs: pd.DataFrame({"f1": [1.0]}),
     )
-
-    fake_model_module = types.ModuleType(
-        "app.services.loader_services.model_loading_service"
-    )
-    fake_model_module.get_model = lambda: FakeShortPipeline()
-    sys.modules["app.services.loader_services.model_loading_service"] = fake_model_module
+    monkeypatch.setattr(model_loading_service, "get_model", lambda: FakeShortPipeline())
 
     with pytest.raises(ValueError, match="ne contient pas assez d'étapes"):
         fbs.build_transformed_features_from_loaded_data(
