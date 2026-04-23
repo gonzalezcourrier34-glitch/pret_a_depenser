@@ -788,3 +788,107 @@ def build_features_for_client(
     )
 
     return row
+
+
+# =============================================================================
+# Transfrome de feature enrichies à features enrichies trabnsformées
+# =============================================================================
+
+def build_transformed_features_from_loaded_data(
+    raw_sources: pd.DataFrame | dict[str, pd.DataFrame] | None = None,
+    *,
+    application_df: pd.DataFrame | None = None,
+    client_ids: Sequence[int] | None = None,
+    debug: bool = False,
+) -> pd.DataFrame:
+    """
+    Construit les features transformées réellement vues par le modèle.
+
+    Notes
+    -----
+    - construit d'abord les features modèle-ready
+    - applique ensuite toute la partie transformation du pipeline
+      (toutes les étapes sauf la dernière, supposée être l'estimateur)
+    - retourne un DataFrame pandas avec les noms de colonnes transformées
+      si disponibles
+    """
+    from sklearn.pipeline import Pipeline
+
+    from app.services.loader_services.model_loading_service import get_model
+
+    raw_df = build_features_from_loaded_data(
+        raw_sources=raw_sources,
+        application_df=application_df,
+        client_ids=client_ids,
+        debug=debug,
+        keep_id=False,
+    )
+
+    model = get_model()
+
+    if not isinstance(model, Pipeline):
+        raise TypeError(
+            "Le modèle chargé n'est pas un Pipeline sklearn. "
+            "Impossible de reconstruire les features transformées."
+        )
+
+    if len(model.steps) < 2:
+        raise ValueError(
+            "Le pipeline chargé ne contient pas assez d'étapes pour "
+            "distinguer transformation et estimateur final."
+        )
+
+    transformer_steps = model.steps[:-1]
+
+    if not transformer_steps:
+        raise ValueError(
+            "Aucune étape de transformation détectée dans le pipeline chargé."
+        )
+
+    transformer_pipeline = Pipeline(transformer_steps)
+    transformed = transformer_pipeline.transform(raw_df)
+
+    feature_names: list[str] | None = None
+
+    if hasattr(transformer_pipeline, "get_feature_names_out"):
+        try:
+            feature_names = list(transformer_pipeline.get_feature_names_out())
+        except Exception:
+            feature_names = None
+
+    if feature_names is None:
+        last_transformer = transformer_steps[-1][1]
+
+        if hasattr(last_transformer, "get_feature_names_out"):
+            try:
+                feature_names = list(last_transformer.get_feature_names_out())
+            except Exception:
+                feature_names = None
+
+    if feature_names is None:
+        if hasattr(transformed, "shape") and len(transformed.shape) == 2:
+            feature_names = [f"feature_{i}" for i in range(transformed.shape[1])]
+        else:
+            raise ValueError(
+                "Impossible de déterminer les noms des features transformées."
+            )
+
+    transformed_df = pd.DataFrame(
+        transformed,
+        columns=feature_names,
+        index=raw_df.index,
+    )
+
+    logger.info(
+        "Transformed features built successfully from pipeline",
+        extra={
+            "extra_data": {
+                "event": "feature_builder_transformed_build_success",
+                "rows": len(transformed_df),
+                "columns": len(transformed_df.columns),
+                "transformer_steps": [name for name, _ in transformer_steps],
+            }
+        },
+    )
+
+    return transformed_df

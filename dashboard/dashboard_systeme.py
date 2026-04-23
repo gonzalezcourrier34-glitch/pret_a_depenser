@@ -12,7 +12,6 @@ Objectifs
 
 Architecture
 ------------
-⚠️ IMPORTANT :
 Cette page ne lit jamais directement PostgreSQL.
 
 Toutes les données affichées proviennent de l'API FastAPI :

@@ -148,9 +148,9 @@ class MonitoringService:
             is_active=is_active,
         )
 
-        payload = {
-            "count": len(rows),
-            "items": [
+        items = []
+        for row in rows:
+            items.append(
                 {
                     "id": row.id,
                     "model_name": row.model_name,
@@ -166,8 +166,11 @@ class MonitoringService:
                     "is_active": row.is_active,
                     "created_at": row.created_at,
                 }
-                for row in rows
-            ],
+            )
+
+        payload = {
+            "count": len(items),
+            "items": items,
         }
 
         logger.info(

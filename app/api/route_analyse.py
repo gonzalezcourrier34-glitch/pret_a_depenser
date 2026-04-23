@@ -153,9 +153,13 @@ def run_evidently(
             "Si absent, la valeur de configuration MONITORING_DIR est utilisée."
         ),
     ),
-    save_html_path: str | None = Query(
-        default="artifacts/evidently/report.html",
-        description="Chemin optionnel de sauvegarde du rapport HTML.",
+    max_rows: int | None = Query(
+        default=20000,
+        ge=1,
+        description=(
+            "Nombre maximal de lignes à analyser pour les jeux de données "
+            "de référence et courant. Si absent, aucune limitation n'est appliquée."
+        ),
     ),
     db: Session = Depends(get_db),
     _: None = Depends(verify_api_key),
@@ -168,6 +172,8 @@ def run_evidently(
     - `reference_kind` et `current_kind` doivent être identiques.
     - La route ne contient pas de logique métier complexe.
     - La persistance des métriques est déléguée à EvidentlyService.
+    - `max_rows` permet de limiter le volume analysé pour accélérer
+      les exécutions.
     """
     resolved_monitoring_dir = _resolve_monitoring_dir(monitoring_dir)
 
@@ -181,7 +187,7 @@ def run_evidently(
                 "reference_kind": reference_kind,
                 "current_kind": current_kind,
                 "monitoring_dir": resolved_monitoring_dir,
-                "save_html_path": save_html_path,
+                "max_rows": max_rows,
             }
         },
     )
@@ -217,7 +223,7 @@ def run_evidently(
             reference_kind=reference_kind,
             current_kind=current_kind,
             monitoring_dir=resolved_monitoring_dir,
-            save_html_path=save_html_path,
+            max_rows=max_rows,
         )
 
         success = bool(result.get("success", False))
@@ -237,7 +243,7 @@ def run_evidently(
                         "logged_metrics": result.get("logged_metrics", 0),
                         "reference_rows": result.get("reference_rows", 0),
                         "current_rows": result.get("current_rows", 0),
-                        "html_report_path": result.get("html_report_path"),
+                        "max_rows": max_rows,
                     }
                 },
             )
@@ -257,7 +263,7 @@ def run_evidently(
                         "logged_metrics": result.get("logged_metrics", 0),
                         "reference_rows": result.get("reference_rows", 0),
                         "current_rows": result.get("current_rows", 0),
-                        "html_report_path": result.get("html_report_path"),
+                        "max_rows": max_rows,
                     }
                 },
             )
@@ -281,6 +287,7 @@ def run_evidently(
                     "reference_kind": reference_kind,
                     "current_kind": current_kind,
                     "monitoring_dir": resolved_monitoring_dir,
+                    "max_rows": max_rows,
                     "error": str(exc),
                 }
             },
@@ -304,7 +311,7 @@ def run_evidently(
                     "reference_kind": reference_kind,
                     "current_kind": current_kind,
                     "monitoring_dir": resolved_monitoring_dir,
-                    "save_html_path": save_html_path,
+                    "max_rows": max_rows,
                     "error": str(exc),
                 }
             },

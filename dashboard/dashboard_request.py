@@ -61,7 +61,7 @@ import requests
 
 
 # =============================================================================
-# Utilitaires HTTP génériques
+# Paramètres HTTP
 # =============================================================================
 
 DEFAULT_TIMEOUT = 30
@@ -69,6 +69,10 @@ DEFAULT_BATCH_TIMEOUT = 60
 DEFAULT_SIMULATION_TIMEOUT = 120
 DEFAULT_ANALYSIS_TIMEOUT = 300
 
+
+# =============================================================================
+# Utilitaires HTTP génériques
+# =============================================================================
 
 def build_headers(api_key: str | None = None) -> dict[str, str]:
     """
@@ -159,6 +163,62 @@ def call_api(
 
 
 # =============================================================================
+# Helpers de parsing JSON
+# =============================================================================
+
+def _extract_items_list(payload: Any) -> list[dict[str, Any]]:
+    """
+    Extrait une liste d'items d'un payload API.
+    """
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+
+    if not isinstance(payload, dict):
+        return []
+
+    for key in ["items", "data", "results"]:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+
+    return []
+
+
+def _extract_single_dict(payload: Any) -> dict[str, Any] | None:
+    """
+    Extrait un dictionnaire métier à partir d'un payload API.
+
+    Gère :
+    - un dict direct
+    - {"item": {...}}
+    - {"data": {...}}
+    - {"model": {...}}
+    - {"result": {...}}
+    - {"items": [{...}]}
+    """
+    if isinstance(payload, dict):
+        for key in ["item", "data", "model", "result"]:
+            value = payload.get(key)
+            if isinstance(value, dict):
+                return value
+
+        items = payload.get("items")
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            return items[0]
+
+        return payload
+
+    return None
+
+
+def _is_probably_error_payload(payload: Any) -> bool:
+    """
+    Détecte un payload de type erreur simple.
+    """
+    return isinstance(payload, dict) and "detail" in payload and len(payload) <= 3
+
+
+# =============================================================================
 # Helpers de conversion
 # =============================================================================
 
@@ -169,16 +229,9 @@ def items_payload_to_dataframe(payload: Any) -> pd.DataFrame:
     if isinstance(payload, pd.DataFrame):
         return payload.copy()
 
-    if isinstance(payload, list):
-        return pd.DataFrame(payload)
-
-    if not isinstance(payload, dict):
-        return pd.DataFrame()
-
-    for key in ["items", "data", "results"]:
-        value = payload.get(key)
-        if isinstance(value, list):
-            return pd.DataFrame(value)
+    items = _extract_items_list(payload)
+    if items:
+        return pd.DataFrame(items)
 
     return pd.DataFrame()
 
@@ -190,10 +243,12 @@ def dict_payload_to_dataframe(payload: Any) -> pd.DataFrame:
     if isinstance(payload, pd.DataFrame):
         return payload.copy()
 
-    if not isinstance(payload, dict) or not payload:
+    row = _extract_single_dict(payload)
+
+    if not isinstance(row, dict) or not row or _is_probably_error_payload(row):
         return pd.DataFrame()
 
-    return pd.DataFrame([payload])
+    return pd.DataFrame([row])
 
 
 def dataframe_to_payload(df: pd.DataFrame) -> dict[str, Any]:
@@ -253,6 +308,10 @@ def _coerce_numeric_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.Data
     return out
 
 
+# =============================================================================
+# Post-traitements DataFrame
+# =============================================================================
+
 def _postprocess_prediction_logs(df: pd.DataFrame) -> pd.DataFrame:
     """
     Post-traitement standard des logs de prédiction.
@@ -276,7 +335,7 @@ def _postprocess_ground_truth(df: pd.DataFrame) -> pd.DataFrame:
     Post-traitement standard des vérités terrain.
     """
     df = _coerce_datetime_columns(df, ["observed_at", "created_at", "gt_created_at"])
-    df = _coerce_numeric_columns(df, ["client_id", "ground_truth", "y_true"])
+    df = _coerce_numeric_columns(df, ["client_id", "ground_truth", "y_true", "true_label"])
 
     if "observed_at" in df.columns:
         df = df.sort_values("observed_at", ascending=False, na_position="last")
@@ -293,6 +352,12 @@ def _postprocess_monitoring_models(df: pd.DataFrame) -> pd.DataFrame:
     Post-traitement standard du registre des modèles.
     """
     df = _coerce_datetime_columns(df, ["deployed_at", "created_at"])
+
+    if "is_active" in df.columns:
+        try:
+            df["is_active"] = df["is_active"].astype("boolean")
+        except Exception:
+            pass
 
     if "deployed_at" in df.columns:
         df = df.sort_values("deployed_at", ascending=False, na_position="last")
@@ -317,11 +382,11 @@ def _postprocess_evaluation_metrics(df: pd.DataFrame) -> pd.DataFrame:
             "f1_score",
             "fbeta_score",
             "business_cost",
+            "sample_size",
             "tn",
             "fp",
             "fn",
             "tp",
-            "sample_size",
         ],
     )
 
@@ -346,6 +411,12 @@ def _postprocess_drift_metrics(df: pd.DataFrame) -> pd.DataFrame:
         ],
     )
     df = _coerce_numeric_columns(df, ["metric_value", "threshold_value"])
+
+    if "drift_detected" in df.columns:
+        try:
+            df["drift_detected"] = df["drift_detected"].astype("boolean")
+        except Exception:
+            pass
 
     if "computed_at" in df.columns:
         df = df.sort_values("computed_at", ascending=False, na_position="last")
@@ -377,6 +448,10 @@ def _postprocess_feature_store(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
+# =============================================================================
+# Helpers métriques
+# =============================================================================
 
 def metric_safe_number(
     df: pd.DataFrame,
@@ -426,6 +501,47 @@ def normalize_prediction_result(payload: Any) -> dict[str, Any]:
 
 
 # =============================================================================
+# Résolution du contexte modèle
+# =============================================================================
+
+def resolve_active_model_context(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str | None = None,
+) -> dict[str, Any]:
+    """
+    Retourne un contexte modèle utilisable par le dashboard.
+
+    Si model_name est fourni, on tente de récupérer le modèle actif
+    correspondant. Sinon, on récupère simplement le modèle actif global.
+    """
+    active_df = get_active_model(
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+    )
+
+    if active_df.empty:
+        return {
+            "model_name": model_name,
+            "model_version": None,
+            "is_active_model_found": False,
+        }
+
+    row = active_df.iloc[0].to_dict()
+
+    return {
+        "model_name": row.get("model_name"),
+        "model_version": row.get("model_version"),
+        "stage": row.get("stage"),
+        "is_active": row.get("is_active"),
+        "deployed_at": row.get("deployed_at"),
+        "is_active_model_found": True,
+    }
+
+
+# =============================================================================
 # Endpoints santé / système
 # =============================================================================
 
@@ -462,11 +578,6 @@ def load_client_features(
 ) -> pd.DataFrame:
     """
     Charge les features d'un client via l'API.
-
-    Notes
-    -----
-    Cet endpoint est optionnel et dépend de l'existence côté API
-    d'une route de type `/features/client/{client_id}`.
     """
     ok, result = call_api(
         f"/features/client/{client_id}",
@@ -480,9 +591,6 @@ def load_client_features(
         return pd.DataFrame()
 
     if isinstance(result, dict):
-        if "items" in result:
-            return items_payload_to_dataframe(result)
-
         if "features" in result and isinstance(result["features"], dict):
             row = {"SK_ID_CURR": client_id, **result["features"]}
             return pd.DataFrame([row])
@@ -491,7 +599,15 @@ def load_client_features(
             row = {"SK_ID_CURR": client_id, **result["data"]}
             return pd.DataFrame([row])
 
-    return pd.DataFrame()
+        if "item" in result and isinstance(result["item"], dict):
+            row = {"SK_ID_CURR": client_id, **result["item"]}
+            return pd.DataFrame([row])
+
+    df = items_payload_to_dataframe(result)
+    if not df.empty and "SK_ID_CURR" not in df.columns:
+        df["SK_ID_CURR"] = client_id
+
+    return df
 
 
 # =============================================================================
@@ -683,7 +799,9 @@ def get_prediction_detail(
     )
 
     if ok and isinstance(result, dict):
-        return result
+        row = _extract_single_dict(result)
+        if isinstance(row, dict) and not _is_probably_error_payload(row):
+            return row
 
     return None
 
@@ -765,6 +883,12 @@ def get_prediction_features_snapshot_df(
     if isinstance(items, list):
         return pd.DataFrame(items)
 
+    if "features" in payload and isinstance(payload["features"], dict):
+        return pd.DataFrame([payload["features"]])
+
+    if "data" in payload and isinstance(payload["data"], dict):
+        return pd.DataFrame([payload["data"]])
+
     return pd.DataFrame()
 
 
@@ -800,76 +924,6 @@ def get_ground_truth_by_request_id(
 # =============================================================================
 # Endpoints monitoring
 # =============================================================================
-
-def get_monitoring_summary(
-    *,
-    base_url: str,
-    api_key: str,
-    model_name: str = "credit_scoring_model",
-    model_version: str | None = None,
-    window_start: str | None = None,
-    window_end: str | None = None,
-) -> dict[str, Any]:
-    """
-    Récupère le résumé global de monitoring.
-    """
-    params: dict[str, Any] = {"model_name": model_name}
-
-    if model_version is not None:
-        params["model_version"] = model_version
-
-    if window_start is not None and window_end is not None:
-        params["window_start"] = window_start
-        params["window_end"] = window_end
-
-    ok, result = call_api(
-        "/monitoring/summary",
-        base_url=base_url,
-        api_key=api_key,
-        method="GET",
-        params=params,
-    )
-
-    if ok and isinstance(result, dict):
-        return result
-
-    return {}
-
-
-def get_monitoring_health(
-    *,
-    base_url: str,
-    api_key: str,
-    model_name: str = "credit_scoring_model",
-    model_version: str | None = None,
-    window_start: str | None = None,
-    window_end: str | None = None,
-) -> dict[str, Any]:
-    """
-    Récupère l'état lisible du monitoring.
-    """
-    params: dict[str, Any] = {"model_name": model_name}
-
-    if model_version is not None:
-        params["model_version"] = model_version
-
-    if window_start is not None and window_end is not None:
-        params["window_start"] = window_start
-        params["window_end"] = window_end
-
-    ok, result = call_api(
-        "/monitoring/health",
-        base_url=base_url,
-        api_key=api_key,
-        method="GET",
-        params=params,
-    )
-
-    if ok and isinstance(result, dict):
-        return result
-
-    return {}
-
 
 def get_models(
     *,
@@ -912,6 +966,13 @@ def get_active_model(
 ) -> pd.DataFrame:
     """
     Récupère le modèle actif.
+
+    Cette fonction est robuste aux formes de réponse suivantes :
+    - dict direct
+    - {"item": {...}}
+    - {"data": {...}}
+    - {"model": {...}}
+    - {"items": [{...}]}
     """
     params: dict[str, Any] = {}
 
@@ -926,10 +987,133 @@ def get_active_model(
         params=params,
     )
 
-    if ok and isinstance(result, dict):
-        return _postprocess_monitoring_models(pd.DataFrame([result]))
+    if not ok:
+        return pd.DataFrame()
 
-    return pd.DataFrame()
+    row = _extract_single_dict(result)
+
+    if not isinstance(row, dict) or not row or _is_probably_error_payload(row):
+        return pd.DataFrame()
+
+    return _postprocess_monitoring_models(pd.DataFrame([row]))
+
+
+def get_monitoring_summary(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    window_start: str | None = None,
+    window_end: str | None = None,
+    auto_resolve_active_model: bool = True,
+) -> dict[str, Any]:
+    """
+    Récupère le résumé global de monitoring.
+
+    Notes
+    -----
+    Le service FastAPI exige model_name.
+    Si model_name n'est pas fourni, on tente d'abord de le récupérer
+    depuis le modèle actif.
+    """
+    resolved_model_name = model_name
+    resolved_model_version = model_version
+
+    if auto_resolve_active_model and resolved_model_name is None:
+        ctx = resolve_active_model_context(
+            base_url=base_url,
+            api_key=api_key,
+            model_name=None,
+        )
+        resolved_model_name = ctx.get("model_name")
+        if resolved_model_version is None:
+            resolved_model_version = ctx.get("model_version")
+
+    if not resolved_model_name:
+        return {
+            "detail": "Impossible de récupérer le monitoring summary : aucun model_name disponible.",
+            "model_name": None,
+            "model_version": resolved_model_version,
+        }
+
+    params: dict[str, Any] = {"model_name": resolved_model_name}
+
+    if resolved_model_version is not None:
+        params["model_version"] = resolved_model_version
+
+    if window_start is not None and window_end is not None:
+        params["window_start"] = window_start
+        params["window_end"] = window_end
+
+    ok, result = call_api(
+        "/monitoring/summary",
+        base_url=base_url,
+        api_key=api_key,
+        method="GET",
+        params=params,
+    )
+
+    if ok and isinstance(result, dict):
+        return result
+
+    return {}
+
+
+def get_monitoring_health(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str | None = None,
+    model_version: str | None = None,
+    window_start: str | None = None,
+    window_end: str | None = None,
+    auto_resolve_active_model: bool = True,
+) -> dict[str, Any]:
+    """
+    Récupère l'état lisible du monitoring.
+    """
+    resolved_model_name = model_name
+    resolved_model_version = model_version
+
+    if auto_resolve_active_model and resolved_model_name is None:
+        ctx = resolve_active_model_context(
+            base_url=base_url,
+            api_key=api_key,
+            model_name=None,
+        )
+        resolved_model_name = ctx.get("model_name")
+        if resolved_model_version is None:
+            resolved_model_version = ctx.get("model_version")
+
+    if not resolved_model_name:
+        return {
+            "detail": "Impossible de récupérer le monitoring health : aucun model_name disponible.",
+            "model_name": None,
+            "model_version": resolved_model_version,
+        }
+
+    params: dict[str, Any] = {"model_name": resolved_model_name}
+
+    if resolved_model_version is not None:
+        params["model_version"] = resolved_model_version
+
+    if window_start is not None and window_end is not None:
+        params["window_start"] = window_start
+        params["window_end"] = window_end
+
+    ok, result = call_api(
+        "/monitoring/health",
+        base_url=base_url,
+        api_key=api_key,
+        method="GET",
+        params=params,
+    )
+
+    if ok and isinstance(result, dict):
+        return result
+
+    return {}
 
 
 def get_evaluation_metrics(
@@ -1139,6 +1323,7 @@ def build_tables_status_dataframe(
     prediction_logs_df: pd.DataFrame,
     ground_truth_df: pd.DataFrame,
     model_registry_df: pd.DataFrame,
+    active_model_df: pd.DataFrame,
     feature_store_monitoring_df: pd.DataFrame,
     drift_metrics_df: pd.DataFrame,
     evaluation_metrics_df: pd.DataFrame,
@@ -1148,6 +1333,8 @@ def build_tables_status_dataframe(
     Construit un DataFrame de synthèse sur les ressources visibles
     dans le dashboard.
     """
+    has_active_model = not active_model_df.empty
+    
     rows = [
         {
             "resource_name": "prediction_logs",
@@ -1163,9 +1350,9 @@ def build_tables_status_dataframe(
         },
         {
             "resource_name": "model_registry",
-            "is_available": not model_registry_df.empty,
+            "is_available": has_active_model,
             "row_count": len(model_registry_df),
-            "comment": "Registre des modèles",
+            "comment": "Registre des modèles avec modèle actif",
         },
         {
             "resource_name": "feature_store_monitoring",
@@ -1234,19 +1421,11 @@ def run_evidently_analysis(
     reference_kind: str = "transformed",
     current_kind: str = "transformed",
     monitoring_dir: str | None = None,
-    save_html_path: str | None = "artifacts/evidently/report.html",
+    max_rows: int | None = 20000,
     timeout: int = DEFAULT_ANALYSIS_TIMEOUT,
 ) -> tuple[bool, Any]:
     """
     Lance une analyse Evidently via l'API FastAPI.
-
-    Notes
-    -----
-    Cette fonction appelle la route :
-    - POST /analyse/evidently/run
-
-    Les paramètres sont passés en query params pour rester cohérents
-    avec la signature actuelle de la route FastAPI.
     """
     params: dict[str, Any] = {
         "model_name": model_name,
@@ -1260,8 +1439,8 @@ def run_evidently_analysis(
     if monitoring_dir is not None:
         params["monitoring_dir"] = monitoring_dir
 
-    if save_html_path is not None:
-        params["save_html_path"] = save_html_path
+    if max_rows is not None:
+        params["max_rows"] = max_rows
 
     return call_api(
         "/analyse/evidently/run",
@@ -1289,14 +1468,6 @@ def run_monitoring_evaluation_analysis(
 ) -> tuple[bool, Any]:
     """
     Lance une analyse d'évaluation monitoring via l'API FastAPI.
-
-    Notes
-    -----
-    Cette fonction appelle la route :
-    - POST /analyse/evaluation/run
-
-    Les paramètres sont passés en query params pour rester cohérents
-    avec la signature actuelle de la route FastAPI.
     """
     params: dict[str, Any] = {
         "model_name": model_name,

@@ -235,11 +235,26 @@ def run_evidently_analysis_wrapper(
     reference_kind: str = "transformed",
     current_kind: str = "transformed",
     monitoring_dir: str | None = None,
-    save_html_path: str | None = "artifacts/evidently/report.html",
+    max_rows: int | None = 20000,
 ) -> tuple[bool, Any]:
     """
     Wrapper local pour lancer une analyse Evidently
     avec la configuration du dashboard.
+
+    Parameters
+    ----------
+    model_name : str
+        Nom du modèle surveillé.
+    model_version : str | None, default=None
+        Version du modèle surveillé.
+    reference_kind : str, default="transformed"
+        Type de dataset de référence.
+    current_kind : str, default="transformed"
+        Type de dataset courant.
+    monitoring_dir : str | None, default=None
+        Dossier de monitoring à utiliser.
+    max_rows : int | None, default=20000
+        Nombre maximal de lignes à analyser.
     """
     return run_evidently_analysis(
         base_url=API_URL,
@@ -249,9 +264,8 @@ def run_evidently_analysis_wrapper(
         reference_kind=reference_kind,
         current_kind=current_kind,
         monitoring_dir=monitoring_dir,
-        save_html_path=save_html_path,
+        max_rows=max_rows,
     )
-
 
 def run_monitoring_evaluation_analysis_wrapper(
     *,
@@ -290,26 +304,42 @@ def run_monitoring_evaluation_analysis_wrapper(
 def load_shared_data(limit: int) -> dict[str, Any]:
     """
     Charge toutes les données partagées du dashboard via l'API.
-
-    Parameters
-    ----------
-    limit : int
-        Nombre maximal de lignes à demander aux endpoints de liste.
-
-    Returns
-    -------
-    dict[str, Any]
-        Dictionnaire des données mutualisées pour toutes les pages.
     """
     health_data = safe_dict(get_health(base_url=API_URL))
+
+    # -------------------------------------------------------------------------
+    # Résolution du modèle actif réel
+    # -------------------------------------------------------------------------
+    active_model_df = safe_dataframe(
+        get_active_model(
+            base_url=API_URL,
+            api_key=API_KEY,
+            model_name=MODEL_NAME or None,
+        )
+    )
+
+    resolved_model_name = MODEL_NAME or None
+    resolved_model_version = MODEL_VERSION or None
+
+    if not active_model_df.empty:
+        first_row = active_model_df.iloc[0].to_dict()
+
+        resolved_model_name = (
+            first_row.get("model_name")
+            or resolved_model_name
+        )
+        resolved_model_version = (
+            first_row.get("model_version")
+            or resolved_model_version
+        )
 
     prediction_logs_df = safe_dataframe(
         get_prediction_history(
             base_url=API_URL,
             api_key=API_KEY,
             limit=limit,
-            model_name=MODEL_NAME,
-            model_version=MODEL_VERSION or None,
+            model_name=resolved_model_name,
+            model_version=resolved_model_version,
         )
     )
 
@@ -325,8 +355,8 @@ def load_shared_data(limit: int) -> dict[str, Any]:
         get_monitoring_summary(
             base_url=API_URL,
             api_key=API_KEY,
-            model_name=MODEL_NAME,
-            model_version=MODEL_VERSION or None,
+            model_name=resolved_model_name,
+            model_version=resolved_model_version,
         )
     )
 
@@ -334,8 +364,8 @@ def load_shared_data(limit: int) -> dict[str, Any]:
         get_monitoring_health(
             base_url=API_URL,
             api_key=API_KEY,
-            model_name=MODEL_NAME,
-            model_version=MODEL_VERSION or None,
+            model_name=resolved_model_name,
+            model_version=resolved_model_version,
         )
     )
 
@@ -344,25 +374,22 @@ def load_shared_data(limit: int) -> dict[str, Any]:
             base_url=API_URL,
             api_key=API_KEY,
             limit=limit,
-            model_name=MODEL_NAME,
+            model_name=None,
         )
     )
 
-    active_model_df = safe_dataframe(
-        get_active_model(
-            base_url=API_URL,
-            api_key=API_KEY,
-            model_name=MODEL_NAME,
-        )
-    )
+    st.write("resolved_model_name =", resolved_model_name)
+    st.write("resolved_model_version =", resolved_model_version)
+    st.write("model_registry_df.shape =", model_registry_df.shape)
+    st.write("active_model_df.shape =", active_model_df.shape)
 
     evaluation_metrics_df = safe_dataframe(
         get_evaluation_metrics(
             base_url=API_URL,
             api_key=API_KEY,
             limit=limit,
-            model_name=MODEL_NAME,
-            model_version=MODEL_VERSION or None,
+            model_name=resolved_model_name,
+            model_version=resolved_model_version,
         )
     )
 
@@ -371,8 +398,8 @@ def load_shared_data(limit: int) -> dict[str, Any]:
             base_url=API_URL,
             api_key=API_KEY,
             limit=limit,
-            model_name=MODEL_NAME,
-            model_version=MODEL_VERSION or None,
+            model_name=resolved_model_name,
+            model_version=resolved_model_version,
         )
     )
 
@@ -381,8 +408,8 @@ def load_shared_data(limit: int) -> dict[str, Any]:
             base_url=API_URL,
             api_key=API_KEY,
             limit=limit,
-            model_name=MODEL_NAME,
-            model_version=MODEL_VERSION or None,
+            model_name=resolved_model_name,
+            model_version=resolved_model_version,
         )
     )
 
@@ -391,8 +418,8 @@ def load_shared_data(limit: int) -> dict[str, Any]:
             base_url=API_URL,
             api_key=API_KEY,
             limit=limit,
-            model_name=MODEL_NAME,
-            model_version=MODEL_VERSION or None,
+            model_name=resolved_model_name,
+            model_version=resolved_model_version,
         )
     )
 
@@ -400,12 +427,13 @@ def load_shared_data(limit: int) -> dict[str, Any]:
         prediction_logs_df=prediction_logs_df,
         ground_truth_df=ground_truth_df,
         model_registry_df=model_registry_df,
+        active_model_df=active_model_df,
         feature_store_monitoring_df=feature_store_monitoring_df,
         drift_metrics_df=drift_metrics_df,
         evaluation_metrics_df=evaluation_metrics_df,
         alerts_df=alerts_df,
     )
-
+    
     preview_map = build_preview_map(
         prediction_logs_df=prediction_logs_df,
         ground_truth_df=ground_truth_df,
@@ -431,8 +459,9 @@ def load_shared_data(limit: int) -> dict[str, Any]:
         "feature_store_monitoring_df": feature_store_monitoring_df,
         "tables_status_df": tables_status_df,
         "preview_map": preview_map,
+        "resolved_model_name": resolved_model_name,
+        "resolved_model_version": resolved_model_version,
     }
-
 
 # =============================================================================
 # UI

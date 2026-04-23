@@ -17,6 +17,9 @@ Notes
 - La lecture des fichiers / caches passe par data_loading_service.
 - L'écriture en base passe par MonitoringService.
 - Ce service orchestre donc la chaîne complète Evidently.
+- La génération HTML locale n'est pas utilisée ici.
+- Le dashboard reposera sur les résultats structurés renvoyés
+  par Evidently et persistés en base.
 """
 
 from __future__ import annotations
@@ -29,8 +32,11 @@ from typing import Any, Literal
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from app.core.config import MONITORING_DIR
+from app.services.features_builder_service import (
+    build_transformed_features_from_loaded_data,
+)
 from app.services.loader_services.data_loading_service import (
-    get_features_ready_cache,
     get_input_feature_names,
     get_raw_data_cache,
     get_reference_features_raw_df,
@@ -39,7 +45,7 @@ from app.services.loader_services.data_loading_service import (
     init_monitoring_reference_cache,
 )
 from app.services.monitoring_service import MonitoringService
-from app.core.config import MONITORING_DIR
+
 
 logger = logging.getLogger(__name__)
 
@@ -144,28 +150,6 @@ class EvidentlyService:
 
         return {}
 
-    def _save_html_report(
-        self,
-        report_object: object,
-        save_html_path: str | None,
-    ) -> str | None:
-        """
-        Sauvegarde le rapport HTML si un chemin est fourni.
-        """
-        if not save_html_path:
-            return None
-
-        output_path = Path(save_html_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if hasattr(report_object, "save_html"):
-            report_object.save_html(str(output_path))  # type: ignore[attr-defined]
-            return str(output_path)
-
-        raise AttributeError(
-            "Le rapport Evidently ne supporte pas `save_html` dans cette version."
-        )
-
     def _find_dataset_drift_block(
         self,
         report_dict: dict[str, Any],
@@ -224,6 +208,22 @@ class EvidentlyService:
         except Exception:
             return default
 
+    def _resolve_monitoring_dir(
+        self,
+        monitoring_dir: str | None,
+    ) -> Path:
+        """
+        Résout le dossier de monitoring à utiliser.
+
+        Priorité :
+        1. paramètre explicite de la route
+        2. variable d'environnement MONITORING_DIR
+        """
+        if monitoring_dir is not None and str(monitoring_dir).strip():
+            return Path(str(monitoring_dir).strip())
+
+        return Path(MONITORING_DIR)
+
     def _load_reference_dataframe(
         self,
         *,
@@ -243,11 +243,19 @@ class EvidentlyService:
         current_kind: Literal["raw", "transformed"],
     ) -> pd.DataFrame:
         """
-        Charge le DataFrame courant via data_loading_service.
-        """
-        if current_kind == "raw":
-            raw_cache = get_raw_data_cache()
+        Charge le DataFrame courant via les caches applicatifs.
 
+        Notes
+        -----
+        - raw :
+            dataset brut applicatif
+        - transformed :
+            dataset post-préprocessing, aligné sur les colonnes réellement
+            vues par le modèle
+        """
+        raw_cache = get_raw_data_cache()
+
+        if current_kind == "raw":
             if "application" in raw_cache:
                 return raw_cache["application"].copy()
 
@@ -262,7 +270,13 @@ class EvidentlyService:
                 "aucune source brute compatible trouvée dans RAW_DATA_CACHE."
             )
 
-        return get_features_ready_cache().copy()
+        transformed_df = build_transformed_features_from_loaded_data(
+            raw_sources=raw_cache,
+            client_ids=None,
+            debug=False,
+        )
+
+        return self._ensure_dataframe(transformed_df, "current_df_transformed")
 
     def _load_feature_names(
         self,
@@ -279,6 +293,59 @@ class EvidentlyService:
 
         return feature_names if feature_names else None
 
+    def _limit_dataframe_rows(
+        self,
+        df: pd.DataFrame,
+        max_rows: int | None,
+        *,
+        name: str,
+    ) -> pd.DataFrame:
+        """
+        Limite le nombre de lignes d'un DataFrame si demandé.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            DataFrame à limiter.
+        max_rows : int | None
+            Nombre maximal de lignes à conserver.
+            Si None, aucune limitation n'est appliquée.
+        name : str
+            Nom logique du DataFrame pour les logs.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame éventuellement tronqué.
+        """
+        checked_df = self._ensure_dataframe(df, name)
+
+        if max_rows is None:
+            return checked_df
+
+        if max_rows <= 0:
+            raise ValueError("`max_rows` doit être strictement positif.")
+
+        if len(checked_df) <= max_rows:
+            return checked_df
+
+        limited_df = checked_df.tail(max_rows).copy()
+
+        logger.info(
+            "Dataframe limited for Evidently analysis",
+            extra={
+                "extra_data": {
+                    "event": "evidently_dataframe_limited",
+                    "name": name,
+                    "original_rows": len(checked_df),
+                    "limited_rows": len(limited_df),
+                    "max_rows": max_rows,
+                }
+            },
+        )
+
+        return limited_df
+
     def _build_response_payload(
         self,
         *,
@@ -289,7 +356,6 @@ class EvidentlyService:
         reference_kind: Literal["raw", "transformed"],
         current_kind: Literal["raw", "transformed"],
         logged_metrics: int,
-        html_report_path: str | None,
         reference_rows: int,
         current_rows: int,
         analyzed_columns: list[str],
@@ -306,7 +372,6 @@ class EvidentlyService:
             "reference_kind": reference_kind,
             "current_kind": current_kind,
             "logged_metrics": logged_metrics,
-            "html_report_path": html_report_path,
             "reference_rows": reference_rows,
             "current_rows": current_rows,
             "analyzed_columns": analyzed_columns,
@@ -323,7 +388,6 @@ class EvidentlyService:
         reference_df: pd.DataFrame,
         current_df: pd.DataFrame,
         feature_names: list[str] | None = None,
-        save_html_path: str | None = None,
     ) -> dict[str, Any]:
         """
         Exécute un rapport de drift de données avec Evidently.
@@ -342,7 +406,6 @@ class EvidentlyService:
                     "reference_rows": len(ref),
                     "current_rows": len(cur),
                     "analyzed_columns_count": len(used_columns),
-                    "save_html_path": save_html_path,
                 }
             },
         )
@@ -368,7 +431,6 @@ class EvidentlyService:
                 "success": False,
                 "message": f"Impossible d'importer Evidently : {exc}",
                 "report": {},
-                "html_report_path": None,
                 "reference_rows": len(ref),
                 "current_rows": len(cur),
                 "analyzed_columns": used_columns,
@@ -379,10 +441,6 @@ class EvidentlyService:
             report.run(current_data=cur, reference_data=ref)
 
             report_dict = self._safe_as_dict(report)
-            html_report_path = self._save_html_report(
-                report,
-                save_html_path=save_html_path,
-            )
 
             logger.info(
                 "Evidently data drift report generated successfully",
@@ -392,7 +450,6 @@ class EvidentlyService:
                         "reference_rows": len(ref),
                         "current_rows": len(cur),
                         "analyzed_columns_count": len(used_columns),
-                        "html_report_path": html_report_path,
                     }
                 },
             )
@@ -401,7 +458,6 @@ class EvidentlyService:
                 "success": True,
                 "message": "Rapport Evidently généré avec succès.",
                 "report": report_dict,
-                "html_report_path": html_report_path,
                 "reference_rows": len(ref),
                 "current_rows": len(cur),
                 "analyzed_columns": used_columns,
@@ -416,7 +472,6 @@ class EvidentlyService:
                         "reference_rows": len(ref),
                         "current_rows": len(cur),
                         "analyzed_columns_count": len(used_columns),
-                        "save_html_path": save_html_path,
                         "error": str(exc),
                     }
                 },
@@ -426,7 +481,6 @@ class EvidentlyService:
                 "success": False,
                 "message": f"Erreur pendant l'exécution d'Evidently : {exc}",
                 "report": {},
-                "html_report_path": None,
                 "reference_rows": len(ref),
                 "current_rows": len(cur),
                 "analyzed_columns": used_columns,
@@ -440,7 +494,6 @@ class EvidentlyService:
         Extrait un résumé dataset-level du drift.
         """
         block = self._find_dataset_drift_block(report)
-
         raw_text = json.dumps(block, ensure_ascii=False)
 
         number_of_drifted_columns: int | None = None
@@ -565,12 +618,29 @@ class EvidentlyService:
         reference_kind: Literal["raw", "transformed"],
         current_kind: Literal["raw", "transformed"],
         monitoring_dir: str | None = None,
-        save_html_path: str | None = None,
+        max_rows: int | None = None,
     ) -> dict[str, Any]:
         """
         Charge les données, exécute Evidently, puis persiste les métriques.
+
+        Parameters
+        ----------
+        model_name : str
+            Nom du modèle surveillé.
+        model_version : str | None
+            Version du modèle surveillé.
+        reference_kind : Literal["raw", "transformed"]
+            Nature du dataset de référence.
+        current_kind : Literal["raw", "transformed"]
+            Nature du dataset courant.
+        monitoring_dir : str | None, default=None
+            Dossier de monitoring à utiliser.
+        max_rows : int | None, default=None
+            Nombre maximal de lignes à analyser pour chaque dataset.
+            Si None, aucune limitation n'est appliquée.
         """
         resolved_model_version = model_version or "unknown"
+        resolved_monitoring_dir = self._resolve_monitoring_dir(monitoring_dir)
 
         logger.info(
             "Starting end-to-end Evidently drift analysis",
@@ -581,16 +651,13 @@ class EvidentlyService:
                     "model_version": resolved_model_version,
                     "reference_kind": reference_kind,
                     "current_kind": current_kind,
-                    "monitoring_dir": monitoring_dir,
-                    "save_html_path": save_html_path,
+                    "monitoring_dir": str(resolved_monitoring_dir),
+                    "max_rows": max_rows,
                 }
             },
         )
 
-        if monitoring_dir:
-            init_monitoring_reference_cache(MONITORING_DIR)
-        else:
-            init_monitoring_reference_cache()
+        init_monitoring_reference_cache(resolved_monitoring_dir)
 
         reference_df = self._load_reference_dataframe(
             reference_kind=reference_kind,
@@ -600,6 +667,17 @@ class EvidentlyService:
         )
         feature_names = self._load_feature_names(
             reference_kind=reference_kind,
+        )
+
+        reference_df = self._limit_dataframe_rows(
+            reference_df,
+            max_rows,
+            name="reference_df",
+        )
+        current_df = self._limit_dataframe_rows(
+            current_df,
+            max_rows,
+            name="current_df",
         )
 
         logger.info(
@@ -614,6 +692,7 @@ class EvidentlyService:
                     "reference_rows": len(reference_df),
                     "current_rows": len(current_df),
                     "feature_names_count": len(feature_names) if feature_names else 0,
+                    "max_rows": max_rows,
                 }
             },
         )
@@ -622,7 +701,6 @@ class EvidentlyService:
             reference_df=reference_df,
             current_df=current_df,
             feature_names=feature_names,
-            save_html_path=save_html_path,
         )
 
         if not bool(result.get("success", False)):
@@ -636,6 +714,7 @@ class EvidentlyService:
                         "reference_kind": reference_kind,
                         "current_kind": current_kind,
                         "message": result.get("message"),
+                        "max_rows": max_rows,
                     }
                 },
             )
@@ -648,11 +727,6 @@ class EvidentlyService:
                 reference_kind=reference_kind,
                 current_kind=current_kind,
                 logged_metrics=0,
-                html_report_path=(
-                    str(result["html_report_path"])
-                    if result.get("html_report_path") is not None
-                    else None
-                ),
                 reference_rows=self._coerce_int(result.get("reference_rows"), 0),
                 current_rows=self._coerce_int(result.get("current_rows"), 0),
                 analyzed_columns=[
@@ -709,7 +783,7 @@ class EvidentlyService:
                     "model_name": model_name,
                     "model_version": resolved_model_version,
                     "logged_metrics": len(drift_rows),
-                    "html_report_path": result.get("html_report_path"),
+                    "max_rows": max_rows,
                 }
             },
         )
@@ -722,11 +796,6 @@ class EvidentlyService:
             reference_kind=reference_kind,
             current_kind=current_kind,
             logged_metrics=len(drift_rows),
-            html_report_path=(
-                str(result["html_report_path"])
-                if result.get("html_report_path") is not None
-                else None
-            ),
             reference_rows=self._coerce_int(result.get("reference_rows"), 0),
             current_rows=self._coerce_int(result.get("current_rows"), 0),
             analyzed_columns=[
@@ -745,11 +814,11 @@ class EvidentlyService:
         reference_df: pd.DataFrame,
         current_df: pd.DataFrame,
         feature_names: list[str] | None = None,
-        save_html_path: str | None = None,
         reference_window_start: object = None,
         reference_window_end: object = None,
         current_window_start: object = None,
         current_window_end: object = None,
+        max_rows: int | None = None,
     ) -> dict[str, Any]:
         """
         Exécute une analyse de drift Evidently à partir de deux DataFrames déjà
@@ -764,23 +833,37 @@ class EvidentlyService:
                     "event": "evidently_analysis_from_dataframes_start",
                     "model_name": model_name,
                     "model_version": resolved_model_version,
-                    "reference_rows": len(reference_df)
-                    if isinstance(reference_df, pd.DataFrame)
-                    else None,
-                    "current_rows": len(current_df)
-                    if isinstance(current_df, pd.DataFrame)
-                    else None,
+                    "reference_rows": (
+                        len(reference_df)
+                        if isinstance(reference_df, pd.DataFrame)
+                        else None
+                    ),
+                    "current_rows": (
+                        len(current_df)
+                        if isinstance(current_df, pd.DataFrame)
+                        else None
+                    ),
                     "feature_names_count": len(feature_names) if feature_names else 0,
-                    "save_html_path": save_html_path,
+                    "max_rows": max_rows,
                 }
             },
         )
 
+        limited_reference_df = self._limit_dataframe_rows(
+            reference_df,
+            max_rows,
+            name="reference_df",
+        )
+        limited_current_df = self._limit_dataframe_rows(
+            current_df,
+            max_rows,
+            name="current_df",
+        )
+
         result = self.run_data_drift_report(
-            reference_df=reference_df,
-            current_df=current_df,
+            reference_df=limited_reference_df,
+            current_df=limited_current_df,
             feature_names=feature_names,
-            save_html_path=save_html_path,
         )
 
         if not bool(result.get("success", False)):
@@ -792,6 +875,7 @@ class EvidentlyService:
                         "model_name": model_name,
                         "model_version": resolved_model_version,
                         "message": result.get("message"),
+                        "max_rows": max_rows,
                     }
                 },
             )
@@ -802,7 +886,6 @@ class EvidentlyService:
                 "model_name": model_name,
                 "model_version": resolved_model_version,
                 "logged_metrics": 0,
-                "html_report_path": result.get("html_report_path"),
                 "reference_rows": result.get("reference_rows", 0),
                 "current_rows": result.get("current_rows", 0),
                 "analyzed_columns": result.get("analyzed_columns", []),
@@ -855,7 +938,7 @@ class EvidentlyService:
                     "model_name": model_name,
                     "model_version": resolved_model_version,
                     "logged_metrics": len(drift_rows),
-                    "html_report_path": result.get("html_report_path"),
+                    "max_rows": max_rows,
                 }
             },
         )
@@ -866,7 +949,6 @@ class EvidentlyService:
             "model_name": model_name,
             "model_version": resolved_model_version,
             "logged_metrics": len(drift_rows),
-            "html_report_path": result.get("html_report_path"),
             "reference_rows": result.get("reference_rows", 0),
             "current_rows": result.get("current_rows", 0),
             "analyzed_columns": result.get("analyzed_columns", []),

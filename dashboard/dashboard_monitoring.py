@@ -85,7 +85,10 @@ def _safe_numeric_series(df: pd.DataFrame, col: str) -> pd.DataFrame:
     return out
 
 
-def _coerce_columns_to_datetime(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+def _coerce_columns_to_datetime(
+    df: pd.DataFrame,
+    columns: Iterable[str],
+) -> pd.DataFrame:
     """
     Convertit plusieurs colonnes en datetime si elles existent.
     """
@@ -95,7 +98,10 @@ def _coerce_columns_to_datetime(df: pd.DataFrame, columns: Iterable[str]) -> pd.
     return out
 
 
-def _coerce_columns_to_numeric(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+def _coerce_columns_to_numeric(
+    df: pd.DataFrame,
+    columns: Iterable[str],
+) -> pd.DataFrame:
     """
     Convertit plusieurs colonnes en numérique si elles existent.
     """
@@ -258,6 +264,54 @@ def _choose_existing_columns(df: pd.DataFrame, preferred_cols: list[str]) -> lis
     return [col for col in preferred_cols if col in df.columns]
 
 
+def _extract_drifted_columns_count(details: Any) -> float | None:
+    """
+    Extrait le nombre de colonnes en drift depuis la colonne `details`
+    si le format correspond à un dictionnaire.
+    """
+    if not isinstance(details, dict):
+        return None
+
+    for key in [
+        "number_of_drifted_columns",
+        "drifted_columns",
+        "n_drifted_columns",
+    ]:
+        value = details.get(key)
+        try:
+            if value is not None and not pd.isna(value):
+                return float(value)
+        except Exception:
+            continue
+
+    return None
+
+
+def _resolve_default_model_context(
+    latest_active_model_row: pd.Series | None,
+    latest_registry_row: pd.Series | None,
+) -> tuple[str | None, str | None]:
+    """
+    Résout le modèle et la version par défaut à utiliser pour lancer
+    les analyses depuis la page monitoring.
+    """
+    default_model_name: str | None = None
+    default_model_version: str | None = None
+
+    source_row = latest_active_model_row if latest_active_model_row is not None else latest_registry_row
+
+    if source_row is not None:
+        model_name_value = source_row.get("model_name")
+        if model_name_value is not None and pd.notna(model_name_value):
+            default_model_name = str(model_name_value)
+
+        model_version_value = source_row.get("model_version")
+        if model_version_value is not None and pd.notna(model_version_value):
+            default_model_version = str(model_version_value)
+
+    return default_model_name, default_model_version
+
+
 # =============================================================================
 # Page principale
 # =============================================================================
@@ -323,6 +377,9 @@ def render_monitoring_page(
     alerts_df = _safe_dataframe(alerts_df)
     feature_store_monitoring_df = _safe_dataframe(feature_store_monitoring_df)
 
+    # -------------------------------------------------------------------------
+    # Normalisation des colonnes
+    # -------------------------------------------------------------------------
     evaluation_metrics_df = _coerce_columns_to_datetime(
         evaluation_metrics_df,
         ["computed_at", "window_start", "window_end"],
@@ -342,6 +399,7 @@ def render_monitoring_page(
             "fp",
             "fn",
             "tp",
+            "metric_value",
         ],
     )
 
@@ -389,6 +447,9 @@ def render_monitoring_page(
         ["snapshot_timestamp"],
     )
 
+    # -------------------------------------------------------------------------
+    # KPI globaux
+    # -------------------------------------------------------------------------
     detected_count_df = 0
     if not drift_metrics_df.empty and "drift_detected" in drift_metrics_df.columns:
         detected_count_df = int(
@@ -441,6 +502,14 @@ def render_monitoring_page(
     has_drift_metrics = _safe_bool(health.get("has_drift_metrics"))
     has_latest_evaluation = _safe_bool(health.get("has_latest_evaluation"))
 
+    default_model_name, default_model_version = _resolve_default_model_context(
+        latest_active_model_row=latest_active_model_row,
+        latest_registry_row=latest_registry_row,
+    )
+
+    # -------------------------------------------------------------------------
+    # En-tête page
+    # -------------------------------------------------------------------------
     st.markdown("## Monitoring MLOps")
     st.caption(
         "Centre de pilotage du modèle en production : performance, dérive, alertes, latence et cycle de vie des versions."
@@ -600,6 +669,9 @@ def render_monitoring_page(
         ]
     )
 
+    # =========================================================================
+    # Onglet 1 - Vue d'ensemble
+    # =========================================================================
     with tabs[0]:
         _render_section_title(
             "Vue d'ensemble",
@@ -655,6 +727,9 @@ def render_monitoring_page(
             else:
                 st.info("Aucune synthèse d'évaluation disponible.")
 
+    # =========================================================================
+    # Onglet 2 - Performance
+    # =========================================================================
     with tabs[1]:
         _render_section_title(
             "Performance du modèle",
@@ -743,18 +818,6 @@ def render_monitoring_page(
         st.markdown("")
         st.markdown("#### Exécution évaluation monitoring")
 
-        default_model_name = "credit_scoring_model"
-        default_model_version = None
-
-        if latest_active_model_row is not None:
-            model_name_value = latest_active_model_row.get("model_name")
-            if model_name_value is not None and pd.notna(model_name_value):
-                default_model_name = str(model_name_value)
-
-            model_version_value = latest_active_model_row.get("model_version")
-            if model_version_value is not None and pd.notna(model_version_value):
-                default_model_version = str(model_version_value)
-
         eval_col1, eval_col2, eval_col3, eval_col4 = st.columns([1, 1, 1, 1])
 
         with eval_col1:
@@ -800,59 +863,62 @@ def render_monitoring_page(
         )
 
         if run_eval_clicked:
-            with st.spinner("Évaluation monitoring en cours..."):
-                ok, result = run_monitoring_evaluation_analysis(
-                    model_name=default_model_name,
-                    model_version=default_model_version,
-                    dataset_name=evaluation_dataset_name,
-                    beta=float(evaluation_beta),
-                    cost_fn=float(evaluation_cost_fn),
-                    cost_fp=float(evaluation_cost_fp),
-                )
-
-            if ok:
-                if isinstance(result, dict) and result.get("success", False):
-                    st.success(
-                        result.get(
-                            "message",
-                            "Évaluation monitoring exécutée avec succès.",
-                        )
+            if not default_model_name:
+                st.error("Impossible de lancer l'évaluation monitoring : aucun modèle actif ou enregistré n'a été trouvé.")
+            else:
+                with st.spinner("Évaluation monitoring en cours..."):
+                    ok, result = run_monitoring_evaluation_analysis(
+                        model_name=default_model_name,
+                        model_version=default_model_version,
+                        dataset_name=evaluation_dataset_name,
+                        beta=float(evaluation_beta),
+                        cost_fn=float(evaluation_cost_fn),
+                        cost_fp=float(evaluation_cost_fp),
                     )
 
-                    sample_size = result.get("sample_size")
-                    matched_rows = result.get("matched_rows")
-                    threshold_used = result.get("threshold_used")
+                if ok:
+                    if isinstance(result, dict) and result.get("success", False):
+                        st.success(
+                            result.get(
+                                "message",
+                                "Évaluation monitoring exécutée avec succès.",
+                            )
+                        )
 
-                    info_parts = []
-                    if sample_size is not None:
-                        info_parts.append(f"sample_size={sample_size}")
-                    if matched_rows is not None:
-                        info_parts.append(f"matched_rows={matched_rows}")
-                    if threshold_used is not None:
-                        info_parts.append(f"threshold_used={threshold_used}")
+                        sample_size = result.get("sample_size")
+                        matched_rows = result.get("matched_rows")
+                        threshold_used = result.get("threshold_used")
 
-                    if info_parts:
-                        st.caption(" | ".join(info_parts))
+                        info_parts = []
+                        if sample_size is not None:
+                            info_parts.append(f"sample_size={sample_size}")
+                        if matched_rows is not None:
+                            info_parts.append(f"matched_rows={matched_rows}")
+                        if threshold_used is not None:
+                            info_parts.append(f"threshold_used={threshold_used}")
 
-                    with st.expander("Voir le résultat de l'évaluation", expanded=False):
-                        st.json(result)
+                        if info_parts:
+                            st.caption(" | ".join(info_parts))
 
-                    st.cache_data.clear()
-                    st.rerun()
+                        with st.expander("Voir le résultat de l'évaluation", expanded=False):
+                            st.json(result)
+
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        detail = (
+                            result.get("message")
+                            if isinstance(result, dict)
+                            else result
+                        )
+                        st.error(f"Évaluation monitoring non réussie : {detail}")
                 else:
                     detail = (
-                        result.get("message")
+                        result.get("detail")
                         if isinstance(result, dict)
                         else result
                     )
-                    st.error(f"Évaluation monitoring non réussie : {detail}")
-            else:
-                detail = (
-                    result.get("detail")
-                    if isinstance(result, dict)
-                    else result
-                )
-                st.error(f"Erreur API évaluation monitoring : {detail}")
+                    st.error(f"Erreur API évaluation monitoring : {detail}")
 
         st.markdown("")
         st.markdown("#### Latence d'inférence")
@@ -864,7 +930,11 @@ def render_monitoring_page(
         elif "latency_ms" not in prediction_logs_df.columns:
             st.info("La colonne `latency_ms` est absente des données reçues.")
         else:
-            latency_time_col = "prediction_timestamp" if "prediction_timestamp" in prediction_logs_df.columns else "created_at"
+            latency_time_col = (
+                "prediction_timestamp"
+                if "prediction_timestamp" in prediction_logs_df.columns
+                else "created_at"
+            )
 
             latency_df = (
                 prediction_logs_df
@@ -877,19 +947,23 @@ def render_monitoring_page(
                     latency_df.set_index(latency_time_col)[["latency_ms"]]
                 )
 
+                latency_mean = round(
+                    _safe_float(metric_safe_number(latency_df, "latency_ms", "mean", 0), 0.0),
+                    2,
+                )
+                latency_p95 = round(
+                    _safe_float(metric_safe_number(latency_df, "latency_ms", "p95", 0), 0.0),
+                    2,
+                )
+                latency_p99 = round(
+                    _safe_float(metric_safe_number(latency_df, "latency_ms", "p99", 0), 0.0),
+                    2,
+                )
+
                 l1, l2, l3 = st.columns(3)
-                l1.metric(
-                    "Latence moyenne",
-                    round(_safe_float(metric_safe_number(latency_df, "latency_ms", "mean", 0), 0.0), 2),
-                )
-                l2.metric(
-                    "Latence p95",
-                    round(_safe_float(metric_safe_number(latency_df, "latency_ms", "p95", 0), 0.0), 2),
-                )
-                l3.metric(
-                    "Latence p99",
-                    round(_safe_float(metric_safe_number(latency_df, "latency_ms", "p99", 0), 0.0), 2),
-                )
+                l1.metric("Latence moyenne", f"{latency_mean} ms")
+                l2.metric("Latence p95", f"{latency_p95} ms")
+                l3.metric("Latence p99", f"{latency_p99} ms")
 
             with st.expander("Voir les logs de latence"):
                 preferred_cols = _choose_existing_columns(
@@ -914,6 +988,9 @@ def render_monitoring_page(
                     width="stretch",
                 )
 
+    # =========================================================================
+    # Onglet 3 - Dérive
+    # =========================================================================
     with tabs[2]:
         _render_section_title(
             "Dérive des données",
@@ -977,29 +1054,163 @@ def render_monitoring_page(
                     drift_view["metric_name"].astype(str) == selected_metric_name
                 ]
 
-            if not drift_view.empty and "feature_name" in drift_view.columns:
-                top_features = drift_view["feature_name"].value_counts().head(15)
-                st.markdown("#### Features les plus souvent remontées")
-                st.bar_chart(top_features)
+            st.markdown("")
+            st.markdown("#### Visualisations de drift")
 
-            if (
-                not drift_view.empty
-                and "computed_at" in drift_view.columns
-                and "metric_value" in drift_view.columns
-            ):
-                timeline_df = (
-                    drift_view
-                    .dropna(subset=["computed_at", "metric_value"])
-                    .sort_values("computed_at")
-                )
-                if not timeline_df.empty:
-                    grouped = (
-                        timeline_df.groupby("computed_at", as_index=True)["metric_value"]
-                        .mean()
-                        .to_frame("metric_value_mean")
+            drift_graph_df = drift_metrics_df.copy()
+
+            if "computed_at" in drift_graph_df.columns:
+                drift_graph_df = drift_graph_df.dropna(subset=["computed_at"])
+
+            if drift_graph_df.empty:
+                st.info("Les métriques de drift ne contiennent pas de date exploitable.")
+            else:
+                drift_graph_df = drift_graph_df.sort_values("computed_at")
+
+                dataset_level_df = drift_graph_df.copy()
+                if "feature_name" in dataset_level_df.columns:
+                    dataset_level_df = dataset_level_df[
+                        dataset_level_df["feature_name"].astype(str).eq("__dataset__")
+                    ]
+
+                share_plot_ready = pd.DataFrame()
+                drifted_count_plot_ready = pd.DataFrame()
+
+                if not dataset_level_df.empty:
+                    if "metric_name" in dataset_level_df.columns and "metric_value" in dataset_level_df.columns:
+                        share_candidates = dataset_level_df[
+                            dataset_level_df["metric_name"]
+                            .astype(str)
+                            .isin(
+                                [
+                                    "share_of_drifted_columns",
+                                    "dataset_drift_share",
+                                    "drift_share",
+                                ]
+                            )
+                        ].copy()
+
+                        if not share_candidates.empty:
+                            share_plot_ready = (
+                                share_candidates
+                                .groupby("computed_at", as_index=True)["metric_value"]
+                                .mean()
+                                .to_frame("share_of_drifted_columns")
+                            )
+
+                    if "details" in dataset_level_df.columns:
+                        dataset_details_df = dataset_level_df.copy()
+                        dataset_details_df["number_of_drifted_columns"] = dataset_details_df["details"].apply(
+                            _extract_drifted_columns_count
+                        )
+                        dataset_details_df = dataset_details_df.dropna(
+                            subset=["number_of_drifted_columns"]
+                        )
+
+                        if not dataset_details_df.empty:
+                            drifted_count_plot_ready = (
+                                dataset_details_df
+                                .groupby("computed_at", as_index=True)["number_of_drifted_columns"]
+                                .mean()
+                                .to_frame("number_of_drifted_columns")
+                            )
+
+                g1, g2 = st.columns(2)
+
+                with g1:
+                    st.markdown("##### Part des colonnes en dérive dans le temps")
+                    if not share_plot_ready.empty:
+                        st.line_chart(share_plot_ready)
+                    else:
+                        st.info(
+                            "Aucune métrique `share_of_drifted_columns` disponible pour l'instant."
+                        )
+
+                with g2:
+                    st.markdown("##### Nombre de colonnes en dérive dans le temps")
+                    if not drifted_count_plot_ready.empty:
+                        st.line_chart(drifted_count_plot_ready)
+                    else:
+                        st.info(
+                            "Aucun nombre de colonnes en dérive disponible pour l'instant."
+                        )
+
+                per_feature_df = drift_graph_df.copy()
+                if "feature_name" in per_feature_df.columns:
+                    per_feature_df = per_feature_df[
+                        ~per_feature_df["feature_name"].astype(str).eq("__dataset__")
+                    ]
+
+                if not per_feature_df.empty and "drift_detected" in per_feature_df.columns:
+                    drift_only_features_df = per_feature_df[
+                        per_feature_df["drift_detected"].apply(_safe_bool)
+                    ].copy()
+
+                    st.markdown("##### Features les plus souvent en dérive")
+
+                    if not drift_only_features_df.empty and "feature_name" in drift_only_features_df.columns:
+                        top_drift_features = (
+                            drift_only_features_df["feature_name"]
+                            .fillna("unknown")
+                            .astype(str)
+                            .value_counts()
+                            .head(15)
+                        )
+                        st.bar_chart(top_drift_features)
+                    else:
+                        st.info("Aucune feature marquée en dérive pour l'instant.")
+
+                if (
+                    not per_feature_df.empty
+                    and "computed_at" in per_feature_df.columns
+                    and "metric_value" in per_feature_df.columns
+                    and "feature_name" in per_feature_df.columns
+                ):
+                    latest_computed_at = per_feature_df["computed_at"].max()
+
+                    latest_feature_drift_df = per_feature_df[
+                        per_feature_df["computed_at"] == latest_computed_at
+                    ].copy()
+
+                    latest_feature_drift_df = latest_feature_drift_df.dropna(
+                        subset=["metric_value"]
                     )
-                    st.markdown("#### Évolution moyenne du score de drift")
-                    st.line_chart(grouped)
+
+                    if not latest_feature_drift_df.empty:
+                        latest_feature_drift_df["feature_name"] = (
+                            latest_feature_drift_df["feature_name"]
+                            .fillna("unknown")
+                            .astype(str)
+                        )
+
+                        top_latest_feature_scores = (
+                            latest_feature_drift_df
+                            .groupby("feature_name", as_index=True)["metric_value"]
+                            .mean()
+                            .sort_values(ascending=False)
+                            .head(15)
+                            .to_frame("metric_value")
+                        )
+
+                        st.markdown("##### Top scores de drift par feature sur la dernière exécution")
+                        st.bar_chart(top_latest_feature_scores)
+
+                if (
+                    not per_feature_df.empty
+                    and "computed_at" in per_feature_df.columns
+                    and "metric_value" in per_feature_df.columns
+                ):
+                    mean_drift_timeline_df = (
+                        per_feature_df
+                        .dropna(subset=["computed_at", "metric_value"])
+                        .groupby("computed_at", as_index=True)["metric_value"]
+                        .mean()
+                        .to_frame("mean_feature_drift_score")
+                    )
+
+                    if not mean_drift_timeline_df.empty:
+                        st.markdown("##### Évolution du score moyen de drift")
+                        st.line_chart(mean_drift_timeline_df)
 
             with st.expander(
                 "Voir le détail complet des métriques de drift",
@@ -1031,19 +1242,7 @@ def render_monitoring_page(
         st.markdown("")
         st.markdown("#### Exécution Evidently")
 
-        default_model_name = "credit_scoring_model"
-        default_model_version = None
-
-        if latest_active_model_row is not None:
-            model_name_value = latest_active_model_row.get("model_name")
-            if model_name_value is not None and pd.notna(model_name_value):
-                default_model_name = str(model_name_value)
-
-            model_version_value = latest_active_model_row.get("model_version")
-            if model_version_value is not None and pd.notna(model_version_value):
-                default_model_version = str(model_version_value)
-
-        run_col1, run_col2, run_col3 = st.columns([1, 1, 1])
+        run_col1, run_col2, run_col3, run_col4 = st.columns([1, 1, 1, 1])
 
         with run_col1:
             evidently_reference_kind = st.selectbox(
@@ -1062,18 +1261,29 @@ def render_monitoring_page(
             )
 
         with run_col3:
+            evidently_max_rows = st.number_input(
+                "Max rows",
+                min_value=1000,
+                max_value=100000,
+                value=20000,
+                step=1000,
+                key="evidently_max_rows",
+            )
+
+        with run_col4:
             st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
             run_evidently_clicked = st.button(
                 "Lancer Evidently",
                 type="primary",
                 use_container_width=True,
+                key="run_evidently_button",
             )
 
         if run_evidently_clicked:
-            if evidently_reference_kind != evidently_current_kind:
-                st.error(
-                    "reference_kind et current_kind doivent être identiques."
-                )
+            if not default_model_name:
+                st.error("Impossible de lancer Evidently : aucun modèle actif ou enregistré n'a été trouvé.")
+            elif evidently_reference_kind != evidently_current_kind:
+                st.error("reference_kind et current_kind doivent être identiques.")
             else:
                 with st.spinner("Analyse Evidently en cours..."):
                     ok, result = run_evidently_analysis(
@@ -1081,7 +1291,7 @@ def render_monitoring_page(
                         model_version=default_model_version,
                         reference_kind=evidently_reference_kind,
                         current_kind=evidently_current_kind,
-                        save_html_path="artifacts/evidently/report.html",
+                        max_rows=int(evidently_max_rows),
                     )
 
                 if ok:
@@ -1093,13 +1303,16 @@ def render_monitoring_page(
                             )
                         )
 
-                        html_report_path = result.get("html_report_path")
-                        if html_report_path:
-                            st.info(f"Rapport HTML sauvegardé : {html_report_path}")
-
                         analyzed_columns = result.get("analyzed_columns")
                         if isinstance(analyzed_columns, list):
                             st.caption(f"Colonnes analysées : {len(analyzed_columns)}")
+
+                        reference_rows = result.get("reference_rows")
+                        current_rows = result.get("current_rows")
+                        if reference_rows is not None or current_rows is not None:
+                            st.caption(
+                                f"reference_rows={reference_rows} | current_rows={current_rows}"
+                            )
 
                         with st.expander("Voir le résultat Evidently", expanded=False):
                             st.json(result)
@@ -1188,6 +1401,9 @@ def render_monitoring_page(
                     width="stretch",
                 )
 
+    # =========================================================================
+    # Onglet 4 - Alertes & Modèles
+    # =========================================================================
     with tabs[3]:
         _render_section_title(
             "Alertes et registre des modèles",
@@ -1295,14 +1511,15 @@ def render_monitoring_page(
         st.markdown("")
         st.markdown("#### Modèle actif")
 
-        if active_model_df.empty:
+        active_row = _pick_latest_row(active_model_df, ["deployed_at", "created_at"])
+
+        if active_row is None:
             st.warning("Aucun modèle actif disponible via `/monitoring/active-model`.")
         else:
-            row = active_model_df.iloc[0]
             st.success(
-                f"Modèle actif : {row.get('model_name', 'N/A')} | "
-                f"version {row.get('model_version', 'N/A')} | "
-                f"stage {row.get('stage', 'N/A')}"
+                f"Modèle actif : {active_row.get('model_name', 'N/A')} | "
+                f"version {active_row.get('model_version', 'N/A')} | "
+                f"stage {active_row.get('stage', 'N/A')}"
             )
 
             preferred_cols = _choose_existing_columns(

@@ -47,6 +47,7 @@ from app.core.schemas import (
     AlertResponse,
     GenericItemsResponse,
     ModelRegistryCreateRequest,
+    ModelRegistryItemResponse,
     ModelRegistryListResponse,
     ModelRegistryRegisterResponse,
     MonitoringHealthResponse,
@@ -96,44 +97,95 @@ def _validate_window(
         )
 
 
+def _safe_get(entity: Any, field_name: str, default: Any = None) -> Any:
+    """
+    Lit un champ depuis un objet ORM ou un dictionnaire.
+    """
+    if isinstance(entity, dict):
+        return entity.get(field_name, default)
+    return getattr(entity, field_name, default)
+
+
 def _serialize_active_model(entity: Any) -> ActiveModelResponse:
     """
     Convertit une entité de modèle actif en schéma de réponse.
+
+    Supporte :
+    - objet ORM
+    - dictionnaire
     """
     return ActiveModelResponse(
-        model_name=entity.model_name,
-        model_version=entity.model_version,
-        stage=entity.stage,
-        run_id=entity.run_id,
-        source_path=entity.source_path,
-        training_data_version=entity.training_data_version,
-        feature_list=entity.feature_list,
-        hyperparameters=entity.hyperparameters,
-        metrics=entity.metrics,
-        deployed_at=entity.deployed_at,
-        is_active=entity.is_active,
-        created_at=entity.created_at,
+        model_name=_safe_get(entity, "model_name"),
+        model_version=_safe_get(entity, "model_version"),
+        stage=_safe_get(entity, "stage"),
+        run_id=_safe_get(entity, "run_id"),
+        source_path=_safe_get(entity, "source_path"),
+        training_data_version=_safe_get(entity, "training_data_version"),
+        feature_list=_safe_get(entity, "feature_list"),
+        hyperparameters=_safe_get(entity, "hyperparameters"),
+        metrics=_safe_get(entity, "metrics"),
+        deployed_at=_safe_get(entity, "deployed_at"),
+        is_active=_safe_get(entity, "is_active"),
+        created_at=_safe_get(entity, "created_at"),
     )
+
+
+def _serialize_model_registry_item(entity: Any) -> ModelRegistryItemResponse:
+    """
+    Convertit une ligne du registre des modèles en schéma de réponse.
+
+    Supporte :
+    - objet ORM
+    - dictionnaire
+    """
+    return ModelRegistryItemResponse(
+        id=_safe_get(entity, "id"),
+        model_name=_safe_get(entity, "model_name"),
+        model_version=_safe_get(entity, "model_version"),
+        stage=_safe_get(entity, "stage"),
+        run_id=_safe_get(entity, "run_id"),
+        source_path=_safe_get(entity, "source_path"),
+        training_data_version=_safe_get(entity, "training_data_version"),
+        feature_list=_safe_get(entity, "feature_list"),
+        hyperparameters=_safe_get(entity, "hyperparameters"),
+        metrics=_safe_get(entity, "metrics"),
+        deployed_at=_safe_get(entity, "deployed_at"),
+        is_active=_safe_get(entity, "is_active"),
+        created_at=_safe_get(entity, "created_at"),
+    )
+
+
+def _serialize_model_registry_items(
+    raw_items: list[Any],
+) -> list[ModelRegistryItemResponse]:
+    """
+    Sérialise une liste d'items de registre de modèles.
+
+    Chaque item peut être :
+    - un objet ORM
+    - un dictionnaire
+    """
+    return [_serialize_model_registry_item(item) for item in raw_items]
 
 
 def _serialize_alert(alert: Any) -> AlertResponse:
     """
-    Convertit une entité ORM Alert en schéma de réponse.
+    Convertit une entité ORM Alert ou un dict en schéma de réponse.
     """
     return AlertResponse(
-        id=alert.id,
-        alert_type=alert.alert_type,
-        severity=alert.severity,
-        model_name=alert.model_name,
-        model_version=alert.model_version,
-        feature_name=alert.feature_name,
-        title=alert.title,
-        message=alert.message,
-        context=alert.context,
-        status=alert.status,
-        created_at=alert.created_at,
-        acknowledged_at=alert.acknowledged_at,
-        resolved_at=alert.resolved_at,
+        id=_safe_get(alert, "id"),
+        alert_type=_safe_get(alert, "alert_type"),
+        severity=_safe_get(alert, "severity"),
+        model_name=_safe_get(alert, "model_name"),
+        model_version=_safe_get(alert, "model_version"),
+        feature_name=_safe_get(alert, "feature_name"),
+        title=_safe_get(alert, "title"),
+        message=_safe_get(alert, "message"),
+        context=_safe_get(alert, "context"),
+        status=_safe_get(alert, "status"),
+        created_at=_safe_get(alert, "created_at"),
+        acknowledged_at=_safe_get(alert, "acknowledged_at"),
+        resolved_at=_safe_get(alert, "resolved_at"),
     )
 
 
@@ -193,10 +245,10 @@ def get_active_model(
             extra={
                 "extra_data": {
                     "event": "monitoring_active_model_success",
-                    "model_name": entity.model_name,
-                    "model_version": entity.model_version,
-                    "stage": entity.stage,
-                    "is_active": entity.is_active,
+                    "model_name": _safe_get(entity, "model_name"),
+                    "model_version": _safe_get(entity, "model_version"),
+                    "stage": _safe_get(entity, "stage"),
+                    "is_active": _safe_get(entity, "is_active"),
                 }
             },
         )
@@ -260,8 +312,9 @@ def get_models(
             is_active=is_active,
         )
 
-        items = payload.get("items", []) if isinstance(payload, dict) else []
-        count = payload.get("count", 0) if isinstance(payload, dict) else 0
+        raw_items = payload.get("items", [])
+        count = payload.get("count", len(raw_items))
+        items = _serialize_model_registry_items(raw_items)
 
         logger.info(
             "Model registry returned successfully",
@@ -271,13 +324,16 @@ def get_models(
                     "limit": limit,
                     "model_name": model_name,
                     "is_active": is_active,
-                    "returned_items": len(items) if isinstance(items, list) else 0,
+                    "returned_items": len(items),
                     "count": count,
                 }
             },
         )
 
-        return ModelRegistryListResponse(**payload)
+        return ModelRegistryListResponse(
+            count=count,
+            items=items,
+        )
 
     except Exception as exc:
         logger.exception(
@@ -691,7 +747,7 @@ def get_feature_store(
     summary="Retourne les alertes récentes",
 )
 def get_recent_alerts(
-    limit: int = Query(default=50, ge=1, le=500),
+    limit: int = Query(default=50, ge=1, le=1000),
     alert_status: str | None = Query(default=None, alias="status"),
     severity: str | None = Query(default=None),
     alert_type: str | None = Query(default=None),
