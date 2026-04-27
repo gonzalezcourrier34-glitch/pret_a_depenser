@@ -83,7 +83,8 @@ class PredictionLog(Base):
     threshold_used = Column(Float, nullable=True)
 
     latency_ms = Column(Float, nullable=True)
-
+    inference_latency_ms = Column(Float, nullable=True)
+    
     input_data = Column(JSONB, nullable=False)
     output_data = Column(JSONB, nullable=True)
 

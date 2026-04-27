@@ -34,7 +34,8 @@ Architecture
 """
 
 from __future__ import annotations
-
+import ast
+import json
 from typing import Any, Iterable
 
 import pandas as pd
@@ -264,25 +265,74 @@ def _choose_existing_columns(df: pd.DataFrame, preferred_cols: list[str]) -> lis
     return [col for col in preferred_cols if col in df.columns]
 
 
+def _parse_details(details: Any) -> dict[str, Any]:
+    """
+    Convertit la colonne details en dictionnaire exploitable.
+
+    En base, details peut arriver sous forme :
+    - dict Python
+    - chaîne JSON
+    - chaîne représentant un dict Python
+    - None
+    """
+    if isinstance(details, dict):
+        return details
+
+    if details is None:
+        return {}
+
+    if isinstance(details, str):
+        text = details.strip()
+
+        if not text:
+            return {}
+
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+
+        try:
+            parsed = ast.literal_eval(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    return {}
+
+
 def _extract_drifted_columns_count(details: Any) -> float | None:
     """
-    Extrait le nombre de colonnes en drift depuis la colonne `details`
-    si le format correspond à un dictionnaire.
+    Extrait le nombre de colonnes en drift depuis details.
     """
-    if not isinstance(details, dict):
-        return None
+    parsed = _parse_details(details)
 
     for key in [
         "number_of_drifted_columns",
         "drifted_columns",
         "n_drifted_columns",
     ]:
-        value = details.get(key)
+        value = parsed.get(key)
         try:
             if value is not None and not pd.isna(value):
                 return float(value)
         except Exception:
             continue
+
+    raw_summary = parsed.get("raw_summary")
+    if isinstance(raw_summary, dict):
+        for key in [
+            "number_of_drifted_columns",
+            "drifted_columns",
+            "n_drifted_columns",
+        ]:
+            value = raw_summary.get(key)
+            try:
+                if value is not None and not pd.isna(value):
+                    return float(value)
+            except Exception:
+                continue
 
     return None
 
@@ -318,6 +368,8 @@ def _resolve_default_model_context(
 
 def render_monitoring_page(
     *,
+    base_url: str,
+    api_key: str,
     monitoring_summary: dict,
     monitoring_health: dict,
     prediction_logs_df: pd.DataFrame,
@@ -329,6 +381,7 @@ def render_monitoring_page(
     feature_store_monitoring_df: pd.DataFrame,
     metric_safe_number,
     run_evidently_analysis,
+    run_evidently_analysis_from_feature_store,
     run_monitoring_evaluation_analysis,
 ) -> None:
     """
@@ -358,6 +411,8 @@ def render_monitoring_page(
         Helper partagé pour calculer des métriques numériques de façon sûre.
     run_evidently_analysis : callable
         Fonction déclenchant l'analyse Evidently via l'API.
+    run_evidently_analysis_from_feature_store : callable
+        Fonction déclenchant l'analyse Evidently depuis feature_store_monitoring.
     run_monitoring_evaluation_analysis : callable
         Fonction déclenchant l'évaluation monitoring via l'API.
     """
@@ -424,7 +479,7 @@ def render_monitoring_page(
     )
     prediction_logs_df = _coerce_columns_to_numeric(
         prediction_logs_df,
-        ["score", "threshold", "threshold_used", "latency_ms", "prediction"],
+        ["score", "threshold", "threshold_used", "latency_ms", "inference_latency_ms", "prediction"],
     )
 
     alerts_df = _coerce_columns_to_datetime(
@@ -550,7 +605,7 @@ def render_monitoring_page(
         _render_card(
             "Latence moyenne",
             latency_label,
-            "Temps moyen d'inférence",
+            "Temps total API + préparation + modèle",
         )
 
     st.markdown("")
@@ -921,7 +976,7 @@ def render_monitoring_page(
                     st.error(f"Erreur API évaluation monitoring : {detail}")
 
         st.markdown("")
-        st.markdown("#### Latence d'inférence")
+        st.markdown("#### Latence et temps pur d'inférence")
 
         if prediction_logs_df.empty:
             st.info("Aucune donnée de prédiction disponible via `/history/predictions`.")
@@ -943,8 +998,13 @@ def render_monitoring_page(
             )
 
             if not latency_df.empty:
+                chart_cols = ["latency_ms"]
+
+                if "inference_latency_ms" in latency_df.columns:
+                    chart_cols.append("inference_latency_ms")
+
                 st.line_chart(
-                    latency_df.set_index(latency_time_col)[["latency_ms"]]
+                    latency_df.set_index(latency_time_col)[chart_cols]
                 )
 
                 latency_mean = round(
@@ -960,10 +1020,52 @@ def render_monitoring_page(
                     2,
                 )
 
+                inference_mean = None
+                inference_p95 = None
+                inference_p99 = None
+
+                if "inference_latency_ms" in latency_df.columns:
+                    inference_mean = round(
+                        _safe_float(
+                            metric_safe_number(latency_df, "inference_latency_ms", "mean", 0),
+                            0.0,
+                        ),
+                        2,
+                    )
+                    inference_p95 = round(
+                        _safe_float(
+                            metric_safe_number(latency_df, "inference_latency_ms", "p95", 0),
+                            0.0,
+                        ),
+                        2,
+                    )
+                    inference_p99 = round(
+                        _safe_float(
+                            metric_safe_number(latency_df, "inference_latency_ms", "p99", 0),
+                            0.0,
+                        ),
+                        2,
+                    )
+
                 l1, l2, l3 = st.columns(3)
-                l1.metric("Latence moyenne", f"{latency_mean} ms")
-                l2.metric("Latence p95", f"{latency_p95} ms")
-                l3.metric("Latence p99", f"{latency_p99} ms")
+                l1.metric("Latence totale moyenne", f"{latency_mean} ms")
+                l2.metric("Latence totale p95", f"{latency_p95} ms")
+                l3.metric("Latence totale p99", f"{latency_p99} ms")
+
+                i1, i2, i3 = st.columns(3)
+                if inference_mean is not None:
+                    i1.metric("Inférence moyenne", f"{inference_mean} ms")
+                    i2.metric("Inférence p95", f"{inference_p95} ms")
+                    i3.metric("Inférence p99", f"{inference_p99} ms")
+                else:
+                    i1.metric("Inférence moyenne", "N/A")
+                    i2.metric("Inférence p95", "N/A")
+                    i3.metric("Inférence p99", "N/A")
+
+                st.caption(
+                    "`latency_ms` = temps total côté service. "
+                    "`inference_latency_ms` = temps pur du modèle, donc le chronomètre utile pour comparer ONNX."
+                )
 
             with st.expander("Voir les logs de latence"):
                 preferred_cols = _choose_existing_columns(
@@ -979,6 +1081,7 @@ def render_monitoring_page(
                         "threshold",
                         "threshold_used",
                         "latency_ms",
+                        "inference_latency_ms",
                         "status",
                         "error_message",
                     ],
@@ -987,7 +1090,6 @@ def render_monitoring_page(
                     latency_df[preferred_cols] if preferred_cols else latency_df,
                     width="stretch",
                 )
-
     # =========================================================================
     # Onglet 3 - Dérive
     # =========================================================================
@@ -1067,151 +1169,189 @@ def render_monitoring_page(
             else:
                 drift_graph_df = drift_graph_df.sort_values("computed_at")
 
-                dataset_level_df = drift_graph_df.copy()
-                if "feature_name" in dataset_level_df.columns:
-                    dataset_level_df = dataset_level_df[
-                        dataset_level_df["feature_name"].astype(str).eq("__dataset__")
-                    ]
+                if "feature_name" not in drift_graph_df.columns:
+                    st.info("La colonne `feature_name` est absente des métriques de drift.")
+                else:
+                    dataset_level_df = drift_graph_df[
+                        drift_graph_df["feature_name"].astype(str).eq("__dataset__")
+                    ].copy()
 
-                share_plot_ready = pd.DataFrame()
-                drifted_count_plot_ready = pd.DataFrame()
+                    per_feature_df = drift_graph_df[
+                        ~drift_graph_df["feature_name"].astype(str).eq("__dataset__")
+                    ].copy()
 
-                if not dataset_level_df.empty:
-                    if "metric_name" in dataset_level_df.columns and "metric_value" in dataset_level_df.columns:
-                        share_candidates = dataset_level_df[
-                            dataset_level_df["metric_name"]
-                            .astype(str)
-                            .isin(
-                                [
-                                    "share_of_drifted_columns",
-                                    "dataset_drift_share",
-                                    "drift_share",
-                                ]
-                            )
-                        ].copy()
+                    share_plot_ready = pd.DataFrame()
+                    drifted_count_plot_ready = pd.DataFrame()
 
-                        if not share_candidates.empty:
+                    if not dataset_level_df.empty:
+                        share_candidates = dataset_level_df.copy()
+
+                        if "metric_name" in share_candidates.columns:
+                            share_candidates = share_candidates[
+                                share_candidates["metric_name"]
+                                .astype(str)
+                                .isin(
+                                    [
+                                        "share_of_drifted_columns",
+                                        "dataset_drift_share",
+                                        "drift_share",
+                                    ]
+                                )
+                            ]
+
+                        if not share_candidates.empty and "metric_value" in share_candidates.columns:
                             share_plot_ready = (
                                 share_candidates
+                                .dropna(subset=["computed_at", "metric_value"])
                                 .groupby("computed_at", as_index=True)["metric_value"]
                                 .mean()
                                 .to_frame("share_of_drifted_columns")
                             )
 
-                    if "details" in dataset_level_df.columns:
-                        dataset_details_df = dataset_level_df.copy()
-                        dataset_details_df["number_of_drifted_columns"] = dataset_details_df["details"].apply(
-                            _extract_drifted_columns_count
-                        )
-                        dataset_details_df = dataset_details_df.dropna(
-                            subset=["number_of_drifted_columns"]
-                        )
+                        if "details" in dataset_level_df.columns:
+                            dataset_details_df = dataset_level_df.copy()
+                            dataset_details_df["number_of_drifted_columns"] = dataset_details_df[
+                                "details"
+                            ].apply(_extract_drifted_columns_count)
 
-                        if not dataset_details_df.empty:
                             drifted_count_plot_ready = (
                                 dataset_details_df
+                                .dropna(subset=["computed_at", "number_of_drifted_columns"])
                                 .groupby("computed_at", as_index=True)["number_of_drifted_columns"]
                                 .mean()
                                 .to_frame("number_of_drifted_columns")
                             )
 
-                g1, g2 = st.columns(2)
+                    g1, g2 = st.columns(2)
 
-                with g1:
-                    st.markdown("##### Part des colonnes en dérive dans le temps")
-                    if not share_plot_ready.empty:
-                        st.line_chart(share_plot_ready)
-                    else:
+                    with g1:
+                        st.markdown("##### Part des colonnes en dérive")
+                        if not share_plot_ready.empty:
+                            st.line_chart(share_plot_ready)
+                        else:
+                            st.info("Aucune métrique globale `share_of_drifted_columns` disponible.")
+
+                    with g2:
+                        st.markdown("##### Nombre de colonnes en dérive")
+                        if not drifted_count_plot_ready.empty:
+                            st.line_chart(drifted_count_plot_ready)
+                        else:
+                            st.info("Aucun nombre de colonnes en dérive disponible.")
+
+                    st.markdown("")
+
+                    if per_feature_df.empty:
                         st.info(
-                            "Aucune métrique `share_of_drifted_columns` disponible pour l'instant."
+                            "Aucune métrique par feature disponible. "
+                            "Il faut que `EvidentlyService` persiste des lignes avec "
+                            "`feature_name != '__dataset__`."
                         )
-
-                with g2:
-                    st.markdown("##### Nombre de colonnes en dérive dans le temps")
-                    if not drifted_count_plot_ready.empty:
-                        st.line_chart(drifted_count_plot_ready)
                     else:
-                        st.info(
-                            "Aucun nombre de colonnes en dérive disponible pour l'instant."
-                        )
+                        if "metric_name" in per_feature_df.columns:
+                            feature_metric_options = (
+                                per_feature_df["metric_name"]
+                                .dropna()
+                                .astype(str)
+                                .unique()
+                                .tolist()
+                            )
+                            feature_metric_options = sorted(feature_metric_options)
 
-                per_feature_df = drift_graph_df.copy()
-                if "feature_name" in per_feature_df.columns:
-                    per_feature_df = per_feature_df[
-                        ~per_feature_df["feature_name"].astype(str).eq("__dataset__")
-                    ]
+                            selected_feature_metric = st.selectbox(
+                                "Métrique feature-level à visualiser",
+                                options=["Toutes"] + feature_metric_options,
+                                key="feature_level_drift_metric_selector",
+                            )
 
-                if not per_feature_df.empty and "drift_detected" in per_feature_df.columns:
-                    drift_only_features_df = per_feature_df[
-                        per_feature_df["drift_detected"].apply(_safe_bool)
-                    ].copy()
+                            if selected_feature_metric != "Toutes":
+                                per_feature_df = per_feature_df[
+                                    per_feature_df["metric_name"].astype(str) == selected_feature_metric
+                                ]
 
-                    st.markdown("##### Features les plus souvent en dérive")
+                        pf1, pf2 = st.columns(2)
 
-                    if not drift_only_features_df.empty and "feature_name" in drift_only_features_df.columns:
-                        top_drift_features = (
-                            drift_only_features_df["feature_name"]
-                            .fillna("unknown")
-                            .astype(str)
-                            .value_counts()
-                            .head(15)
-                        )
-                        st.bar_chart(top_drift_features)
-                    else:
-                        st.info("Aucune feature marquée en dérive pour l'instant.")
+                        with pf1:
+                            st.markdown("##### Features les plus souvent en dérive")
 
-                if (
-                    not per_feature_df.empty
-                    and "computed_at" in per_feature_df.columns
-                    and "metric_value" in per_feature_df.columns
-                    and "feature_name" in per_feature_df.columns
-                ):
-                    latest_computed_at = per_feature_df["computed_at"].max()
+                            if "drift_detected" in per_feature_df.columns:
+                                drift_only_features_df = per_feature_df[
+                                    per_feature_df["drift_detected"].apply(_safe_bool)
+                                ].copy()
+                            else:
+                                drift_only_features_df = pd.DataFrame()
 
-                    latest_feature_drift_df = per_feature_df[
-                        per_feature_df["computed_at"] == latest_computed_at
-                    ].copy()
+                            if (
+                                not drift_only_features_df.empty
+                                and "feature_name" in drift_only_features_df.columns
+                            ):
+                                top_drift_features = (
+                                    drift_only_features_df["feature_name"]
+                                    .fillna("unknown")
+                                    .astype(str)
+                                    .value_counts()
+                                    .head(15)
+                                )
+                                st.bar_chart(top_drift_features)
+                            else:
+                                st.info("Aucune feature marquée en dérive pour l'instant.")
 
-                    latest_feature_drift_df = latest_feature_drift_df.dropna(
-                        subset=["metric_value"]
-                    )
+                        with pf2:
+                            st.markdown("##### Top scores de drift dernière exécution")
 
-                    if not latest_feature_drift_df.empty:
-                        latest_feature_drift_df["feature_name"] = (
-                            latest_feature_drift_df["feature_name"]
-                            .fillna("unknown")
-                            .astype(str)
-                        )
+                            if (
+                                "computed_at" in per_feature_df.columns
+                                and "metric_value" in per_feature_df.columns
+                                and "feature_name" in per_feature_df.columns
+                            ):
+                                latest_computed_at = per_feature_df["computed_at"].max()
+                                latest_feature_drift_df = per_feature_df[
+                                    per_feature_df["computed_at"] == latest_computed_at
+                                ].copy()
 
-                        top_latest_feature_scores = (
-                            latest_feature_drift_df
-                            .groupby("feature_name", as_index=True)["metric_value"]
-                            .mean()
-                            .sort_values(ascending=False)
-                            .head(15)
-                            .to_frame("metric_value")
-                        )
+                                latest_feature_drift_df = latest_feature_drift_df.dropna(
+                                    subset=["metric_value"]
+                                )
 
-                        st.markdown("##### Top scores de drift par feature sur la dernière exécution")
-                        st.bar_chart(top_latest_feature_scores)
+                                if not latest_feature_drift_df.empty:
+                                    latest_feature_drift_df["feature_name"] = (
+                                        latest_feature_drift_df["feature_name"]
+                                        .fillna("unknown")
+                                        .astype(str)
+                                    )
 
-                if (
-                    not per_feature_df.empty
-                    and "computed_at" in per_feature_df.columns
-                    and "metric_value" in per_feature_df.columns
-                ):
-                    mean_drift_timeline_df = (
-                        per_feature_df
-                        .dropna(subset=["computed_at", "metric_value"])
-                        .groupby("computed_at", as_index=True)["metric_value"]
-                        .mean()
-                        .to_frame("mean_feature_drift_score")
-                    )
+                                    top_latest_feature_scores = (
+                                        latest_feature_drift_df
+                                        .groupby("feature_name", as_index=True)["metric_value"]
+                                        .mean()
+                                        .sort_values(ascending=False)
+                                        .head(15)
+                                        .to_frame("metric_value")
+                                    )
 
-                    if not mean_drift_timeline_df.empty:
-                        st.markdown("##### Évolution du score moyen de drift")
-                        st.line_chart(mean_drift_timeline_df)
+                                    st.bar_chart(top_latest_feature_scores)
+                                else:
+                                    st.info("Aucun score feature-level exploitable sur la dernière exécution.")
+                            else:
+                                st.info("Colonnes nécessaires absentes pour le top score par feature.")
 
+                        st.markdown("##### Évolution du score moyen de drift feature-level")
+
+                        if (
+                            "computed_at" in per_feature_df.columns
+                            and "metric_value" in per_feature_df.columns
+                        ):
+                            mean_drift_timeline_df = (
+                                per_feature_df
+                                .dropna(subset=["computed_at", "metric_value"])
+                                .groupby("computed_at", as_index=True)["metric_value"]
+                                .mean()
+                                .to_frame("mean_feature_drift_score")
+                            )
+
+                            if not mean_drift_timeline_df.empty:
+                                st.line_chart(mean_drift_timeline_df)
+                            else:
+                                st.info("Aucune évolution du score moyen disponible.")
             with st.expander(
                 "Voir le détail complet des métriques de drift",
                 expanded=True,
@@ -1242,64 +1382,131 @@ def render_monitoring_page(
         st.markdown("")
         st.markdown("#### Exécution Evidently")
 
-        run_col1, run_col2, run_col3, run_col4 = st.columns([1, 1, 1, 1])
+        st.info(
+            "Pour détecter la dérive créée par la simulation totalement aléatoire, "
+            "utilise l’analyse depuis les snapshots avec source_table=`random_simulation`."
+        )
 
-        with run_col1:
-            evidently_reference_kind = st.selectbox(
-                "Reference kind",
-                options=["transformed", "raw"],
-                index=0,
-                key="evidently_reference_kind",
-            )
+        with st.expander("Analyse Evidently depuis les données brutes applicatives", expanded=False):
+            run_col1, run_col2 = st.columns([1, 1])
 
-        with run_col2:
-            evidently_current_kind = st.selectbox(
-                "Current kind",
-                options=["transformed", "raw"],
-                index=0,
-                key="evidently_current_kind",
-            )
+            with run_col1:
+                evidently_max_rows = st.number_input(
+                    "Max rows cache",
+                    min_value=1000,
+                    max_value=100000,
+                    value=20000,
+                    step=1000,
+                    key="evidently_max_rows",
+                )
 
-        with run_col3:
-            evidently_max_rows = st.number_input(
-                "Max rows",
-                min_value=1000,
-                max_value=100000,
-                value=20000,
-                step=1000,
-                key="evidently_max_rows",
-            )
+            with run_col2:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                run_evidently_clicked = st.button(
+                    "Analyser les données brutes",
+                    type="secondary",
+                    use_container_width=True,
+                    key="run_evidently_cache_button",
+                )
 
-        with run_col4:
-            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-            run_evidently_clicked = st.button(
-                "Lancer Evidently",
-                type="primary",
-                use_container_width=True,
-                key="run_evidently_button",
-            )
-
-        if run_evidently_clicked:
-            if not default_model_name:
-                st.error("Impossible de lancer Evidently : aucun modèle actif ou enregistré n'a été trouvé.")
-            elif evidently_reference_kind != evidently_current_kind:
-                st.error("reference_kind et current_kind doivent être identiques.")
-            else:
-                with st.spinner("Analyse Evidently en cours..."):
-                    ok, result = run_evidently_analysis(
-                        model_name=default_model_name,
-                        model_version=default_model_version,
-                        reference_kind=evidently_reference_kind,
-                        current_kind=evidently_current_kind,
-                        max_rows=int(evidently_max_rows),
+            if run_evidently_clicked:
+                if not default_model_name:
+                    st.error(
+                        "Impossible de lancer Evidently : aucun modèle actif ou enregistré n'a été trouvé."
                     )
+                else:
+                    with st.spinner("Analyse Evidently sur données brutes en cours..."):
+                        ok, result = run_evidently_analysis(
+                            model_name=default_model_name,
+                            model_version=default_model_version,
+                            reference_kind="raw",
+                            current_kind="raw",
+                            max_rows=int(evidently_max_rows),
+                        )
 
-                if ok:
-                    if isinstance(result, dict) and result.get("success", False):
+                    if ok and isinstance(result, dict) and result.get("success", False):
                         st.success(
                             result.get(
                                 "message",
-                                "Analyse Evidently exécutée avec succès.",
+                                "Analyse Evidently sur données brutes exécutée avec succès.",
+                            )
+                        )
+
+                        with st.expander("Voir le résultat Evidently données brutes", expanded=False):
+                            st.json(result)
+
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        detail = result.get("message") if isinstance(result, dict) else result
+                        st.error(f"Analyse Evidently données brutes non réussie : {detail}")
+
+        with st.expander("Analyse Evidently depuis les snapshots de production", expanded=True):
+            snap_col1, snap_col2, snap_col3 = st.columns([1, 1, 1])
+
+            available_sources = [
+                "simulate_real_sample",
+                "simulate_random",
+                "api_request",
+                "features_ready_cache",
+            ]
+
+            if not feature_store_monitoring_df.empty and "source_table" in feature_store_monitoring_df.columns:
+                db_sources = (
+                    feature_store_monitoring_df["source_table"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+                available_sources = sorted(set(available_sources + db_sources))
+
+            with snap_col1:
+                snapshot_source_table = st.selectbox(
+                    "Source snapshots",
+                    options=available_sources,
+                    index=available_sources.index("simulate_real_sample")
+                    if "simulate_real_sample" in available_sources
+                    else 0,
+                    key="evidently_snapshot_source_table",
+                )
+
+            with snap_col2:
+                snapshot_max_rows = st.number_input(
+                    "Max rows snapshots",
+                    min_value=100,
+                    max_value=100000,
+                    value=10000,
+                    step=100,
+                    key="evidently_snapshot_max_rows",
+                )
+
+            with snap_col3:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                run_snapshot_evidently_clicked = st.button(
+                    "Analyser les snapshots bruts",
+                    type="primary",
+                    use_container_width=True,
+                    key="run_evidently_snapshot_button",
+                )
+
+            if run_snapshot_evidently_clicked:
+                if not default_model_name:
+                    st.error("Impossible de lancer Evidently : aucun modèle actif ou enregistré n'a été trouvé.")
+                else:
+                    with st.spinner("Analyse Evidently depuis les snapshots bruts en cours..."):
+                        ok, result = run_evidently_analysis_from_feature_store(
+                            model_name=default_model_name,
+                            model_version=default_model_version,
+                            source_table=snapshot_source_table,
+                            max_rows=min(int(snapshot_max_rows), 10000),
+                        )
+
+                    if ok and isinstance(result, dict) and result.get("success", False):
+                        st.success(
+                            result.get(
+                                "message",
+                                "Analyse Evidently snapshots bruts exécutée avec succès.",
                             )
                         )
 
@@ -1307,100 +1514,31 @@ def render_monitoring_page(
                         if isinstance(analyzed_columns, list):
                             st.caption(f"Colonnes analysées : {len(analyzed_columns)}")
 
-                        reference_rows = result.get("reference_rows")
-                        current_rows = result.get("current_rows")
-                        if reference_rows is not None or current_rows is not None:
-                            st.caption(
-                                f"reference_rows={reference_rows} | current_rows={current_rows}"
-                            )
+                        st.caption(
+                            f"source_table={snapshot_source_table} | "
+                            f"reference_kind=raw | "
+                            f"current_kind=raw | "
+                            f"reference_rows={result.get('reference_rows')} | "
+                            f"current_rows={result.get('current_rows')}"
+                        )
 
-                        with st.expander("Voir le résultat Evidently", expanded=False):
+                        with st.expander("Voir le résultat Evidently snapshots bruts", expanded=False):
                             st.json(result)
 
                         st.cache_data.clear()
                         st.rerun()
-
                     else:
-                        detail = (
-                            result.get("message")
-                            if isinstance(result, dict)
-                            else result
-                        )
-                        st.error(f"Analyse Evidently non réussie : {detail}")
-                else:
-                    detail = (
-                        result.get("detail")
-                        if isinstance(result, dict)
-                        else result
-                    )
-                    st.error(f"Erreur API Evidently : {detail}")
+                        if isinstance(result, dict):
+                            detail = (
+                                result.get("message")
+                                or result.get("detail")
+                                or result.get("error")
+                                or result
+                            )
+                        else:
+                            detail = result
 
-        st.markdown("")
-        st.markdown("#### Feature store monitoring")
-
-        if feature_store_monitoring_df.empty:
-            st.info("Aucune donnée disponible via `/monitoring/feature-store`.")
-        else:
-            fs1, fs2, fs3 = st.columns(3)
-            fs1.metric("Snapshots", len(feature_store_monitoring_df))
-            fs2.metric(
-                "Request IDs",
-                feature_store_monitoring_df["request_id"].nunique()
-                if "request_id" in feature_store_monitoring_df.columns
-                else 0,
-            )
-            fs3.metric(
-                "Features distinctes",
-                feature_store_monitoring_df["feature_name"].nunique()
-                if "feature_name" in feature_store_monitoring_df.columns
-                else 0,
-            )
-
-            vis_col1, vis_col2 = st.columns(2)
-
-            with vis_col1:
-                if "feature_name" in feature_store_monitoring_df.columns:
-                    st.markdown("##### Top features observées")
-                    top_fs_features = (
-                        feature_store_monitoring_df["feature_name"]
-                        .fillna("unknown")
-                        .value_counts()
-                        .head(15)
-                    )
-                    st.bar_chart(top_fs_features)
-
-            with vis_col2:
-                if "source_table" in feature_store_monitoring_df.columns:
-                    st.markdown("##### Répartition par source_table")
-                    source_counts = (
-                        feature_store_monitoring_df["source_table"]
-                        .fillna("unknown")
-                        .value_counts()
-                        .head(15)
-                    )
-                    st.bar_chart(source_counts)
-
-            with st.expander("Voir le feature store", expanded=False):
-                preferred_cols = _choose_existing_columns(
-                    feature_store_monitoring_df,
-                    [
-                        "snapshot_timestamp",
-                        "request_id",
-                        "client_id",
-                        "model_name",
-                        "model_version",
-                        "feature_name",
-                        "feature_value",
-                        "feature_type",
-                        "source_table",
-                    ],
-                )
-                st.dataframe(
-                    feature_store_monitoring_df[preferred_cols]
-                    if preferred_cols else feature_store_monitoring_df,
-                    width="stretch",
-                )
-
+                        st.error(f"Analyse Evidently snapshots bruts non réussie : {detail}")
     # =========================================================================
     # Onglet 4 - Alertes & Modèles
     # =========================================================================

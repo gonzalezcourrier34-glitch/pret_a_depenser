@@ -53,7 +53,10 @@ from app.services.loader_services.data_loading_service import (
     get_data_cache,
     get_features_for_client_from_cache,
 )
-from app.services.loader_services.model_loading_service import get_model, get_threshold
+from app.services.loader_services.model_loading_service import (
+    get_threshold,
+    predict_proba_with_backend,
+)
 from app.services.prediction_logging_service import PredictionLoggingService
 
 
@@ -197,77 +200,40 @@ def _safe_request_id() -> str:
 # Helpers modèle
 # =============================================================================
 
-def _predict_scores(df: pd.DataFrame) -> pd.Series:
+def _predict_scores(df: pd.DataFrame) -> tuple[pd.Series, float]:
     """
-    Calcule les scores de probabilité de la classe positive.
+    Calcule les scores de probabilité de la classe positive
+    avec le backend configuré : sklearn ou ONNX.
     """
-    model = get_model()
+    df = _ensure_dataframe(df)
 
-    if not hasattr(model, "predict_proba"):
-        raise AttributeError(
-            "Le modèle chargé ne possède pas de méthode `predict_proba`."
-        )
+    inference_start = time.perf_counter()
 
-    logger.info(
-        "Computing prediction probabilities",
-        extra={
-            "extra_data": {
-                "event": "prediction_service_predict_scores_start",
-                "rows": len(df),
-                "columns": len(df.columns),
-                "model_name": MODEL_NAME,
-                "model_version": MODEL_VERSION,
-            }
-        },
-    )
+    scores_list: list[float] = []
 
-    proba = model.predict_proba(df)
-    proba = np.asarray(proba)
+    for _, row in df.iterrows():
+        features = _clean_feature_dict(row.to_dict())
+        score = predict_proba_with_backend(pd.DataFrame([features]))
+        scores_list.append(float(score))
 
-    if proba.ndim != 2 or proba.shape[1] < 2:
-        raise ValueError(
-            "La sortie de `predict_proba` ne contient pas deux colonnes de probabilités."
-        )
+    inference_latency_ms = (time.perf_counter() - inference_start) * 1000
 
-    logger.info(
-        "Prediction probabilities computed successfully",
-        extra={
-            "extra_data": {
-                "event": "prediction_service_predict_scores_success",
-                "rows": len(df),
-                "columns": len(df.columns),
-                "output_columns": int(proba.shape[1]),
-            }
-        },
-    )
-
-    return pd.Series(proba[:, 1], index=df.index, dtype="float64")
+    scores = pd.Series(scores_list, index=df.index, dtype="float64")
+    return scores, inference_latency_ms
 
 
-def _predict_raw(features: dict[str, Any]) -> tuple[int, float, float]:
+def _predict_raw(features: dict[str, Any]) -> tuple[int, float, float, float]:
     """
     Réalise la prédiction brute sans journalisation.
     """
     threshold = float(get_threshold())
     df = _ensure_dataframe_from_dict(features)
 
-    score = float(_predict_scores(df).iloc[0])
+    scores, inference_latency_ms = _predict_scores(df)
+    score = float(scores.iloc[0])
     prediction = int(score >= threshold)
 
-    logger.info(
-        "Raw prediction computed",
-        extra={
-            "extra_data": {
-                "event": "prediction_service_predict_raw_success",
-                "prediction": prediction,
-                "score": score,
-                "threshold_used": threshold,
-                "feature_count": len(features),
-            }
-        },
-    )
-
-    return prediction, score, threshold
+    return prediction, score, threshold, inference_latency_ms
 
 
 # =============================================================================
@@ -403,7 +369,13 @@ def _load_client_source_dataframe() -> pd.DataFrame:
 
 def _generate_random_value_from_series(series: pd.Series) -> Any:
     """
-    Génère une valeur aléatoire à partir du profil observé d'une colonne.
+    Génère une valeur artificielle volontairement décalée pour simuler du drift.
+
+    Objectif
+    --------
+    Cette fonction ne cherche pas à générer un client réaliste.
+    Elle sert à produire une population volontairement différente
+    de la population de référence afin de tester le monitoring de drift.
     """
     clean = series.dropna()
 
@@ -413,17 +385,51 @@ def _generate_random_value_from_series(series: pd.Series) -> Any:
     numeric = pd.to_numeric(clean, errors="coerce")
     numeric_ratio = numeric.notna().mean()
 
+    # Colonnes numériques
     if numeric_ratio >= 0.90:
         numeric_clean = numeric.dropna()
 
         if numeric_clean.empty:
             return None
 
-        min_val = numeric_clean.min()
-        max_val = numeric_clean.max()
+        if pd.api.types.is_integer_dtype(clean):
+            min_value = int(numeric_clean.min())
+            max_value = int(numeric_clean.max())
 
-        if min_val == max_val:
-            return float(min_val) if not float(min_val).is_integer() else int(min_val)
+            if min_value == max_value:
+                return min_value
+
+            return random.randint(min_value, max_value)
+
+        q05 = numeric_clean.quantile(0.05)
+        q25 = numeric_clean.quantile(0.25)
+        q75 = numeric_clean.quantile(0.75)
+        q95 = numeric_clean.quantile(0.95)
+
+        col = str(series.name or "")
+
+        # Drift métier ciblé : population plus risquée
+        if col == "AMT_INCOME_TOTAL":
+            value = random.uniform(float(q05), float(q25))
+
+        elif col in {"AMT_CREDIT", "AMT_ANNUITY", "AMT_GOODS_PRICE"}:
+            value = random.uniform(float(q75), float(q95))
+
+        elif col in {"EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"}:
+            value = random.uniform(float(q05), float(q25))
+
+        elif col in {"DAYS_BIRTH"}:
+            value = random.uniform(float(q05), float(q25))
+
+        elif col in {"DAYS_EMPLOYED"}:
+            value = random.uniform(float(q05), float(q25))
+
+        else:
+            # Drift générique : on tire surtout dans les queues de distribution
+            if random.random() < 0.5:
+                value = random.uniform(float(q05), float(q25))
+            else:
+                value = random.uniform(float(q75), float(q95))
 
         is_integer_like = (
             pd.api.types.is_integer_dtype(numeric_clean)
@@ -434,16 +440,22 @@ def _generate_random_value_from_series(series: pd.Series) -> Any:
         )
 
         if is_integer_like:
-            return int(random.randint(int(min_val), int(max_val)))
+            return int(round(value))
 
-        return float(random.uniform(float(min_val), float(max_val)))
+        return float(value)
 
-    values = clean.astype(str).unique().tolist()
-    if not values:
+    # Colonnes catégorielles
+    values = clean.astype(str).value_counts(normalize=True)
+
+    if values.empty:
         return None
 
-    return random.choice(values)
+    # Drift catégoriel : on favorise les modalités rares
+    rare_values = values.sort_values(ascending=True).head(
+        min(5, len(values))
+    ).index.tolist()
 
+    return random.choice(rare_values)
 
 def _build_random_feature_rows_from_application(
     *,
@@ -568,6 +580,7 @@ def _log_success_prediction(
     score: float,
     threshold_used: float,
     latency_ms: float | None,
+    inference_latency_ms: float | None,
     source_table: str,
 ) -> None:
     """
@@ -585,6 +598,7 @@ def _log_success_prediction(
         score=score,
         threshold_used=threshold_used,
         latency_ms=latency_ms,
+        inference_latency_ms=inference_latency_ms,
         client_id=client_id,
         write_feature_store_monitoring=True,
         source_table=source_table,
@@ -596,6 +610,7 @@ def _log_success_prediction(
             "model_name": MODEL_NAME,
             "model_version": MODEL_VERSION,
             "latency_ms": latency_ms,
+            "inference_latency_ms": inference_latency_ms,
         },
         status_code=200,
     )
@@ -609,6 +624,7 @@ def _log_error_prediction(
     input_data: dict[str, Any],
     error_message: str,
     latency_ms: float | None,
+    inference_latency_ms: float | None,
     status_code: int = 500,
 ) -> None:
     """
@@ -623,6 +639,7 @@ def _log_error_prediction(
         client_id=client_id,
         status_code=status_code,
         latency_ms=latency_ms,
+        inference_latency_ms=inference_latency_ms,
     )
 
 
@@ -634,6 +651,7 @@ def _build_success_item(
     score: float,
     threshold_used: float,
     latency_ms: float | None,
+    inference_latency_ms: float | None,
 ) -> dict[str, Any]:
     """
     Construit un item de succès standardisé pour les réponses batch.
@@ -647,6 +665,7 @@ def _build_success_item(
         "model_name": MODEL_NAME,
         "model_version": MODEL_VERSION,
         "latency_ms": latency_ms,
+        "inference_latency_ms": inference_latency_ms,
         "status": "success",
     }
 
@@ -657,6 +676,7 @@ def _build_error_item(
     client_id: int | None,
     error_message: str,
     latency_ms: float | None,
+    inference_latency_ms: float | None,
 ) -> dict[str, Any]:
     """
     Construit un item d'erreur standardisé pour les réponses batch.
@@ -671,6 +691,7 @@ def _build_error_item(
         "model_name": MODEL_NAME,
         "model_version": MODEL_VERSION,
         "latency_ms": latency_ms,
+        "inference_latency_ms": inference_latency_ms,
         "status": "error",
     }
 
@@ -685,7 +706,7 @@ def make_prediction(
     client_id: int | None = None,
     db: Session | None = None,
     source_table: str = "api_request",
-) -> dict[str, Any] | tuple[int, float, float]:
+) -> dict[str, Any] | tuple[int, float, float, float]:
     """
     Réalise une prédiction unitaire.
     """
@@ -721,9 +742,10 @@ def make_prediction(
     prediction_logger = PredictionLoggingService(db=db)
     request_id = _safe_request_id()
     start_time = time.perf_counter()
+    inference_latency_ms: float | None = None
 
     try:
-        prediction, score, threshold_used = _predict_raw(clean_features)
+        prediction, score, threshold_used, inference_latency_ms = _predict_raw(clean_features)
         latency_ms = (time.perf_counter() - start_time) * 1000
 
         _log_success_prediction(
@@ -735,6 +757,7 @@ def make_prediction(
             score=score,
             threshold_used=threshold_used,
             latency_ms=latency_ms,
+            inference_latency_ms=inference_latency_ms,
             source_table=source_table,
         )
 
@@ -747,6 +770,7 @@ def make_prediction(
             "model_name": MODEL_NAME,
             "model_version": MODEL_VERSION,
             "latency_ms": latency_ms,
+            "inference_latency_ms" : inference_latency_ms,
             "status": "success",
         }
 
@@ -761,6 +785,7 @@ def make_prediction(
                     "score": score,
                     "threshold_used": threshold_used,
                     "latency_ms": latency_ms,
+                    "inference_latency_ms" : inference_latency_ms,
                     "source_table": source_table,
                 }
             },
@@ -779,6 +804,7 @@ def make_prediction(
                     "request_id": request_id,
                     "client_id": client_id,
                     "latency_ms": latency_ms,
+                    "inference_latency_ms" : inference_latency_ms,
                     "source_table": source_table,
                     "error": str(exc),
                 }
@@ -793,6 +819,7 @@ def make_prediction(
                 input_data=clean_features,
                 error_message=str(exc),
                 latency_ms=latency_ms,
+                inference_latency_ms=inference_latency_ms,
                 status_code=500,
             )
         except Exception as log_exc:
@@ -816,7 +843,7 @@ def make_prediction_from_client_id(
     *,
     db: Session | None = None,
     source_table: str = "features_ready_cache",
-) -> dict[str, Any] | tuple[int, float, float]:
+) -> dict[str, Any] | tuple[int, float, float, float]:
     """
     Réalise une prédiction unitaire à partir d'un identifiant client.
     """
@@ -842,7 +869,7 @@ def make_prediction_from_client_id(
     )
 
 
-def make_prediction_from_dataframe(df: pd.DataFrame) -> tuple[int, float, float]:
+def make_prediction_from_dataframe(df: pd.DataFrame) -> tuple[int, float, float, float]:
     """
     Réalise une prédiction unitaire à partir d'un DataFrame contenant une seule ligne.
     """
@@ -886,12 +913,13 @@ def predict_one_row(df: pd.DataFrame) -> dict[str, Any]:
     """
     Retourne le résultat d'une prédiction unitaire sous forme de dictionnaire.
     """
-    prediction, score, threshold = make_prediction_from_dataframe(df)
+    prediction, score, threshold, inference_latency_ms = make_prediction_from_dataframe(df)
 
     return {
         "prediction": prediction,
         "score": score,
         "threshold_used": threshold,
+        "inference_latency_ms": inference_latency_ms,
     }
 
 
@@ -921,7 +949,7 @@ def make_batch_prediction(df: pd.DataFrame) -> pd.DataFrame:
 
     for _, row in df.iterrows():
         feature_dict = _clean_feature_dict(row.to_dict())
-        prediction, score, threshold = _predict_raw(feature_dict)
+        prediction, score, threshold, inference_latency_ms = _predict_raw(feature_dict)
 
         enriched_row = dict(feature_dict)
         enriched_row["score"] = score
@@ -975,10 +1003,12 @@ def run_batch_prediction(
     items: list[dict[str, Any]] = []
     success_count = 0
     error_count = 0
+    batch_inference_latency_ms = 0.0
 
     for payload in payloads:
         request_id = _safe_request_id()
         start_time = time.perf_counter()
+        inference_latency_ms: float | None = None
 
         client_id = payload.get("client_id")
         features = payload.get("features", {})
@@ -988,7 +1018,12 @@ def run_batch_prediction(
                 raise TypeError("Chaque payload doit contenir un dictionnaire `features`.")
 
             clean_features = _clean_feature_dict(features)
-            prediction, score, threshold_used = _predict_raw(clean_features)
+
+            prediction, score, threshold_used, inference_latency_ms = _predict_raw(
+                clean_features
+            )
+            batch_inference_latency_ms += inference_latency_ms or 0.0
+
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             _log_success_prediction(
@@ -1000,6 +1035,7 @@ def run_batch_prediction(
                 score=score,
                 threshold_used=threshold_used,
                 latency_ms=latency_ms,
+                inference_latency_ms=inference_latency_ms,
                 source_table=source_table,
             )
 
@@ -1011,6 +1047,7 @@ def run_batch_prediction(
                     score=score,
                     threshold_used=threshold_used,
                     latency_ms=latency_ms,
+                    inference_latency_ms=inference_latency_ms,
                 )
             )
             success_count += 1
@@ -1027,6 +1064,7 @@ def run_batch_prediction(
                         "client_id": client_id,
                         "source_table": source_table,
                         "latency_ms": latency_ms,
+                        "inference_latency_ms": inference_latency_ms,
                         "error": str(exc),
                     }
                 },
@@ -1042,6 +1080,7 @@ def run_batch_prediction(
                     ),
                     error_message=str(exc),
                     latency_ms=latency_ms,
+                    inference_latency_ms=inference_latency_ms,
                     status_code=500,
                 )
             except Exception as log_exc:
@@ -1063,6 +1102,7 @@ def run_batch_prediction(
                     client_id=client_id,
                     error_message=str(exc),
                     latency_ms=latency_ms,
+                    inference_latency_ms=inference_latency_ms,
                 )
             )
             error_count += 1
@@ -1076,6 +1116,7 @@ def run_batch_prediction(
         "model_name": MODEL_NAME,
         "model_version": MODEL_VERSION,
         "batch_latency_ms": batch_latency_ms,
+        "batch_inference_latency_ms": batch_inference_latency_ms,
         "items": items,
     }
 
@@ -1088,13 +1129,13 @@ def run_batch_prediction(
                 "success_count": success_count,
                 "error_count": error_count,
                 "batch_latency_ms": batch_latency_ms,
+                "batch_inference_latency_ms": batch_inference_latency_ms,
                 "source_table": source_table,
             }
         },
     )
 
     return payload
-
 
 # =============================================================================
 # API publique - batch clients
@@ -1125,11 +1166,13 @@ def predict_batch_from_client_ids(
 
     prediction_logger = PredictionLoggingService(db=db)
     batch_start_time = time.perf_counter()
-
+    inference_latency_ms: float | None = None
+    
     items: list[dict[str, Any]] = []
     success_count = 0
     error_count = 0
-
+    batch_inference_latency_ms = 0.0
+    
     for client_id in client_ids:
         request_id = _safe_request_id()
         start_time = time.perf_counter()
@@ -1143,7 +1186,7 @@ def predict_batch_from_client_ids(
                 )
 
             clean_features = _clean_feature_dict(features)
-            prediction, score, threshold_used = _predict_raw(clean_features)
+            prediction, score, threshold_used, inference_latency_ms = _predict_raw(clean_features)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             _log_success_prediction(
@@ -1155,6 +1198,7 @@ def predict_batch_from_client_ids(
                 score=score,
                 threshold_used=threshold_used,
                 latency_ms=latency_ms,
+                inference_latency_ms=inference_latency_ms,
                 source_table=source_table,
             )
 
@@ -1166,9 +1210,11 @@ def predict_batch_from_client_ids(
                     score=score,
                     threshold_used=threshold_used,
                     latency_ms=latency_ms,
+                    inference_latency_ms=inference_latency_ms,
                 )
             )
             success_count += 1
+            batch_inference_latency_ms += inference_latency_ms or 0.0
 
         except Exception as exc:
             latency_ms = (time.perf_counter() - start_time) * 1000
@@ -1183,6 +1229,7 @@ def predict_batch_from_client_ids(
                         "client_id": safe_client_id,
                         "source_table": source_table,
                         "latency_ms": latency_ms,
+                        "inference_latency_ms": inference_latency_ms,
                         "error": str(exc),
                     }
                 },
@@ -1196,6 +1243,7 @@ def predict_batch_from_client_ids(
                     input_data={"client_id": client_id},
                     error_message=str(exc),
                     latency_ms=latency_ms,
+                    inference_latency_ms=inference_latency_ms,
                     status_code=500,
                 )
             except Exception as log_exc:
@@ -1217,6 +1265,7 @@ def predict_batch_from_client_ids(
                     client_id=safe_client_id,
                     error_message=str(exc),
                     latency_ms=latency_ms,
+                    inference_latency_ms=inference_latency_ms,
                 )
             )
             error_count += 1
@@ -1230,6 +1279,7 @@ def predict_batch_from_client_ids(
         "model_name": MODEL_NAME,
         "model_version": MODEL_VERSION,
         "batch_latency_ms": batch_latency_ms,
+        "batch_inference_latency_ms": batch_inference_latency_ms,
         "items": items,
     }
 
@@ -1242,6 +1292,7 @@ def predict_batch_from_client_ids(
                 "success_count": success_count,
                 "error_count": error_count,
                 "batch_latency_ms": batch_latency_ms,
+                "batch_inference_latency_ms": batch_inference_latency_ms,
                 "source_table": source_table,
             }
         },
@@ -1360,6 +1411,8 @@ def run_random_feature_simulation(
     items: list[dict[str, Any]] = []
     success_count = 0
     error_count = 0
+    batch_inference_latency_ms = 0.0
+    inference_latency_ms: float | None = None
 
     for _, row in model_ready_df.iterrows():
         request_id = _safe_request_id()
@@ -1368,7 +1421,7 @@ def run_random_feature_simulation(
         client_id, features = _sanitize_feature_row(row.to_dict())
 
         try:
-            prediction, score, threshold_used = _predict_raw(features)
+            prediction, score, threshold_used, inference_latency_ms = _predict_raw(features)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             _log_success_prediction(
@@ -1380,6 +1433,7 @@ def run_random_feature_simulation(
                 score=score,
                 threshold_used=threshold_used,
                 latency_ms=latency_ms,
+                inference_latency_ms=inference_latency_ms,
                 source_table=source_table,
             )
 
@@ -1391,9 +1445,11 @@ def run_random_feature_simulation(
                     score=score,
                     threshold_used=threshold_used,
                     latency_ms=latency_ms,
+                    inference_latency_ms=inference_latency_ms,
                 )
             )
             success_count += 1
+            batch_inference_latency_ms += inference_latency_ms or 0.0
 
         except Exception as exc:
             latency_ms = (time.perf_counter() - start_time) * 1000
@@ -1407,6 +1463,7 @@ def run_random_feature_simulation(
                         "client_id": client_id,
                         "source_table": source_table,
                         "latency_ms": latency_ms,
+                        "inference_latency_ms": inference_latency_ms,
                         "error": str(exc),
                     }
                 },
@@ -1420,6 +1477,7 @@ def run_random_feature_simulation(
                     input_data=features,
                     error_message=str(exc),
                     latency_ms=latency_ms,
+                    inference_latency_ms=inference_latency_ms,
                     status_code=500,
                 )
             except Exception as log_exc:
@@ -1441,6 +1499,7 @@ def run_random_feature_simulation(
                     client_id=client_id,
                     error_message=str(exc),
                     latency_ms=latency_ms,
+                    inference_latency_ms=inference_latency_ms,
                 )
             )
             error_count += 1
@@ -1454,6 +1513,7 @@ def run_random_feature_simulation(
         "model_name": MODEL_NAME,
         "model_version": MODEL_VERSION,
         "batch_latency_ms": batch_latency_ms,
+        "batch_inference_latency_ms": batch_inference_latency_ms,
         "items": items,
     }
 
@@ -1466,6 +1526,7 @@ def run_random_feature_simulation(
                 "success_count": success_count,
                 "error_count": error_count,
                 "batch_latency_ms": batch_latency_ms,
+                "batch_inference_latency_ms": batch_inference_latency_ms,
                 "source_table": source_table,
             }
         },

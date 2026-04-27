@@ -1,17 +1,4 @@
-"""
-Chargement centralisé du modèle et du seuil de décision.
-
-Ce module gère :
-- le chargement unique du modèle sérialisé
-- le chargement unique du seuil métier
-- des outils de debug optionnels
-- un test rapide de fonctionnement du modèle
-
-Notes
------
-- Le chargement repose sur un mécanisme de singleton simple.
-- Le debug est activable via la variable d'environnement `DEBUG_MODEL`.
-"""
+# app/services/loader_services/model_loading_service.py
 
 from __future__ import annotations
 
@@ -23,41 +10,36 @@ from typing import Any
 
 import joblib
 import numpy as np
+import onnxruntime as ort
 import pandas as pd
 
-from app.core.config import DEBUG_MODEL, MODEL_PATH, THRESHOLD_PATH
-
+from app.core.config import (
+    DEBUG_MODEL,
+    MODEL_BACKEND,
+    MODEL_PATH,
+    ONNX_MODEL_PATH,
+    THRESHOLD_PATH,
+)
 
 logger = logging.getLogger(__name__)
 
-
-# =============================================================================
-# Variables globales (singletons)
-# =============================================================================
-
 _MODEL: Any | None = None
+_ONNX_SESSION: ort.InferenceSession | None = None
 _THRESHOLD: float | None = None
 
 
 # =============================================================================
-# Utils debug
+# Debug
 # =============================================================================
 
 def _log_separator(title: str) -> None:
-    """
-    Écrit un séparateur lisible dans les logs de debug.
-    """
     logger.debug("=" * 80)
     logger.debug("%s", title)
     logger.debug("=" * 80)
 
 
 def debug_model(model: Any) -> None:
-    """
-    Affiche des informations utiles sur le modèle chargé.
-    """
     _log_separator("DEBUG MODEL")
-
     logger.debug("Type modèle : %s", type(model))
 
     if hasattr(model, "n_features_in_"):
@@ -65,10 +47,7 @@ def debug_model(model: Any) -> None:
 
     if hasattr(model, "feature_names_in_"):
         feature_names = list(model.feature_names_in_)
-        logger.debug("Features attendues (aperçu) : %s", feature_names[:20])
-
-        if len(feature_names) > 20:
-            logger.debug("... +%s autres", len(feature_names) - 20)
+        logger.debug("Features attendues aperçu : %s", feature_names[:20])
 
     try:
         size_mb = sys.getsizeof(model) / 1024**2
@@ -78,305 +57,283 @@ def debug_model(model: Any) -> None:
 
 
 def debug_threshold(threshold: float) -> None:
-    """
-    Affiche des informations utiles sur le seuil chargé.
-    """
     _log_separator("DEBUG THRESHOLD")
-
     logger.debug("Seuil utilisé : %s", threshold)
 
-    if not (0 <= threshold <= 1):
-        logger.debug("WARNING : seuil hors [0,1]")
-
 
 # =============================================================================
-# Chargement du modèle
+# Chargement sklearn / joblib
 # =============================================================================
 
-def load_model() -> Any:
+def load_sklearn_model() -> Any:
     """
-    Charge le modèle depuis le disque.
-
-    Returns
-    -------
-    Any
-        Modèle chargé en mémoire.
-
-    Raises
-    ------
-    FileNotFoundError
-        Si le fichier du modèle est introuvable.
-    Exception
-        Si le chargement joblib échoue.
+    Charge le modèle sklearn/joblib.
     """
     global _MODEL
 
-    if _MODEL is None:
-        model_path = Path(MODEL_PATH)
-
+    if _MODEL is not None:
         logger.info(
-            "Model loading started",
-            extra={
-                "extra_data": {
-                    "event": "model_load_start",
-                    "model_path": str(model_path),
-                }
-            },
+            "Sklearn model already loaded, using cache",
+            extra={"extra_data": {"event": "sklearn_model_cache_hit"}},
         )
+        return _MODEL
 
-        if not model_path.exists():
-            logger.error(
-                "Model file not found",
-                extra={
-                    "extra_data": {
-                        "event": "model_load_not_found",
-                        "model_path": str(model_path),
-                    }
-                },
-            )
-            raise FileNotFoundError(f"Modèle introuvable : {model_path}")
+    model_path = Path(MODEL_PATH)
 
-        try:
-            _MODEL = joblib.load(model_path)
+    logger.info(
+        "Sklearn model loading started",
+        extra={"extra_data": {"event": "sklearn_model_load_start", "model_path": str(model_path)}},
+    )
 
-            logger.info(
-                "Model loaded successfully",
-                extra={
-                    "extra_data": {
-                        "event": "model_load_success",
-                        "model_path": str(model_path),
-                        "model_type": type(_MODEL).__name__,
-                        "n_features_in": getattr(_MODEL, "n_features_in_", None),
-                    }
-                },
-            )
+    if not model_path.exists():
+        raise FileNotFoundError(f"Modèle sklearn introuvable : {model_path}")
 
-            if DEBUG_MODEL:
-                debug_model(_MODEL)
+    _MODEL = joblib.load(model_path)
 
-        except Exception as exc:
-            logger.exception(
-                "Unexpected error while loading model",
-                extra={
-                    "extra_data": {
-                        "event": "model_load_exception",
-                        "model_path": str(model_path),
-                        "error": str(exc),
-                    }
-                },
-            )
-            raise
+    logger.info(
+        "Sklearn model loaded successfully",
+        extra={
+            "extra_data": {
+                "event": "sklearn_model_load_success",
+                "model_path": str(model_path),
+                "model_type": type(_MODEL).__name__,
+                "n_features_in": getattr(_MODEL, "n_features_in_", None),
+            }
+        },
+    )
 
-    else:
-        logger.info(
-            "Model already loaded, using cache",
-            extra={
-                "extra_data": {
-                    "event": "model_load_cache_hit",
-                    "model_type": type(_MODEL).__name__ if _MODEL is not None else None,
-                }
-            },
-        )
+    if DEBUG_MODEL:
+        debug_model(_MODEL)
 
     return _MODEL
 
 
 # =============================================================================
-# Chargement du seuil
+# Chargement ONNX
+# =============================================================================
+
+def load_onnx_session() -> ort.InferenceSession:
+    """
+    Charge le modèle ONNX avec onnxruntime.
+    """
+    global _ONNX_SESSION
+
+    if _ONNX_SESSION is not None:
+        logger.info(
+            "ONNX session already loaded, using cache",
+            extra={"extra_data": {"event": "onnx_session_cache_hit"}},
+        )
+        return _ONNX_SESSION
+
+    model_path = Path(ONNX_MODEL_PATH)
+
+    logger.info(
+        "ONNX session loading started",
+        extra={"extra_data": {"event": "onnx_session_load_start", "model_path": str(model_path)}},
+    )
+
+    if not model_path.exists():
+        raise FileNotFoundError(f"Modèle ONNX introuvable : {model_path}")
+
+    _ONNX_SESSION = ort.InferenceSession(
+        str(model_path),
+        providers=["CPUExecutionProvider"],
+    )
+
+    logger.info(
+        "ONNX session loaded successfully",
+        extra={
+            "extra_data": {
+                "event": "onnx_session_load_success",
+                "model_path": str(model_path),
+                "inputs": [i.name for i in _ONNX_SESSION.get_inputs()],
+                "outputs": [o.name for o in _ONNX_SESSION.get_outputs()],
+            }
+        },
+    )
+
+    return _ONNX_SESSION
+
+
+# =============================================================================
+# Chargement selon backend
+# =============================================================================
+
+def load_model() -> Any:
+    """
+    Charge le backend configuré.
+
+    MODEL_BACKEND=sklearn -> joblib
+    MODEL_BACKEND=onnx -> onnxruntime
+    """
+    backend = MODEL_BACKEND.lower().strip()
+
+    if backend == "onnx":
+        return load_onnx_session()
+
+    if backend == "sklearn":
+        return load_sklearn_model()
+
+    raise ValueError(
+        f"MODEL_BACKEND invalide : {MODEL_BACKEND}. Valeurs attendues : 'sklearn' ou 'onnx'."
+    )
+
+
+def predict_proba_with_backend(features_df: pd.DataFrame) -> float:
+    """
+    Calcule la probabilité de défaut avec le backend actif.
+
+    Backend sklearn :
+    - utilise directement le pipeline joblib.
+
+    Backend ONNX :
+    - alimente chaque feature attendue par ONNX séparément.
+    - utile quand le modèle ONNX a été exporté avec un input par colonne.
+    """
+    backend = MODEL_BACKEND.lower().strip()
+
+    if backend == "sklearn":
+        model = load_sklearn_model()
+        return float(model.predict_proba(features_df)[0, 1])
+
+    if backend != "onnx":
+        raise ValueError(
+            f"MODEL_BACKEND invalide : {MODEL_BACKEND}. "
+            "Valeurs attendues : 'sklearn' ou 'onnx'."
+        )
+
+    session = load_onnx_session()
+    inputs = session.get_inputs()
+
+    if features_df.empty:
+        raise ValueError("features_df est vide.")
+
+    row = features_df.iloc[0]
+
+    input_feed: dict[str, np.ndarray] = {}
+
+    for input_meta in inputs:
+        name = input_meta.name
+        input_type = input_meta.type
+
+        if name not in row.index:
+            raise ValueError(
+                f"La feature ONNX attendue `{name}` est absente du DataFrame."
+            )
+
+        value = row[name]
+
+        if pd.isna(value):
+            value = None
+
+        # Tensor string
+        if "string" in input_type:
+            input_feed[name] = np.array(
+                [[str(value) if value is not None else ""]],
+                dtype=object,
+            )
+
+        # Tensor int
+        elif "int64" in input_type:
+            safe_value = 0 if value is None else int(value)
+            input_feed[name] = np.array([[safe_value]], dtype=np.int64)
+
+        # Tensor float/double
+        else:
+            safe_value = np.nan if value is None else float(value)
+            input_feed[name] = np.array([[safe_value]], dtype=np.float32)
+
+    outputs = session.run(None, input_feed)
+
+    # Cas fréquent avec classifier ONNX :
+    # outputs[0] = label
+    # outputs[1] = probabilities
+    proba = outputs[1] if len(outputs) > 1 else outputs[0]
+
+    # Parfois proba est une liste de dicts si ZipMap=True
+    if isinstance(proba, list) and proba and isinstance(proba[0], dict):
+        return float(proba[0].get(1, proba[0].get("1")))
+
+    proba = np.asarray(proba)
+
+    if proba.ndim == 2 and proba.shape[1] >= 2:
+        return float(proba[0, 1])
+
+    if proba.ndim == 1:
+        return float(proba[0])
+
+    raise ValueError(f"Format de sortie ONNX inattendu : shape={proba.shape}")
+
+
+# =============================================================================
+# Seuil
 # =============================================================================
 
 def load_threshold() -> float:
     """
     Charge le seuil métier depuis le disque.
-
-    Si le fichier est absent ou invalide, un fallback à 0.5 est utilisé.
-
-    Returns
-    -------
-    float
-        Seuil de décision métier.
     """
     global _THRESHOLD
 
-    if _THRESHOLD is None:
-        threshold_path = Path(THRESHOLD_PATH)
+    if _THRESHOLD is not None:
+        return _THRESHOLD
+
+    threshold_path = Path(THRESHOLD_PATH)
+
+    try:
+        with threshold_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        _THRESHOLD = float(data["threshold"])
+
+        if not 0 <= _THRESHOLD <= 1:
+            raise ValueError("Le seuil doit être compris entre 0 et 1.")
 
         logger.info(
-            "Threshold loading started",
+            "Threshold loaded successfully",
             extra={
                 "extra_data": {
-                    "event": "threshold_load_start",
+                    "event": "threshold_load_success",
                     "threshold_path": str(threshold_path),
-                }
-            },
-        )
-
-        try:
-            if not threshold_path.exists():
-                raise FileNotFoundError(f"Seuil introuvable : {threshold_path}")
-
-            with threshold_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            if "threshold" not in data:
-                raise KeyError("La clé 'threshold' est absente du fichier JSON.")
-
-            threshold = float(data["threshold"])
-
-            if not 0 <= threshold <= 1:
-                raise ValueError("Le seuil doit être compris entre 0 et 1.")
-
-            _THRESHOLD = threshold
-
-            logger.info(
-                "Threshold loaded successfully",
-                extra={
-                    "extra_data": {
-                        "event": "threshold_load_success",
-                        "threshold_path": str(threshold_path),
-                        "threshold": _THRESHOLD,
-                    }
-                },
-            )
-
-        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError) as exc:
-            _THRESHOLD = 0.5
-
-            logger.warning(
-                "Threshold load failed, fallback applied",
-                extra={
-                    "extra_data": {
-                        "event": "threshold_load_fallback",
-                        "threshold_path": str(threshold_path),
-                        "fallback_threshold": _THRESHOLD,
-                        "error": str(exc),
-                    }
-                },
-            )
-
-        if DEBUG_MODEL:
-            debug_threshold(_THRESHOLD)
-
-    else:
-        logger.info(
-            "Threshold already loaded, using cache",
-            extra={
-                "extra_data": {
-                    "event": "threshold_load_cache_hit",
                     "threshold": _THRESHOLD,
                 }
             },
         )
 
-    return _THRESHOLD
-
-
-# =============================================================================
-# Test rapide du modèle (optionnel)
-# =============================================================================
-
-def test_model_prediction() -> None:
-    """
-    Test rapide pour vérifier que le modèle répond.
-
-    Notes
-    -----
-    Ce test reste indicatif. Pour certains pipelines sklearn,
-    un DataFrame avec noms de colonnes peut être nécessaire.
-    """
-    model = get_model()
-
-    logger.info(
-        "Model prediction smoke test started",
-        extra={
-            "extra_data": {
-                "event": "model_test_start",
-                "model_type": type(model).__name__,
-            }
-        },
-    )
-
-    if not hasattr(model, "predict_proba"):
-        logger.warning(
-            "Model does not expose predict_proba",
-            extra={
-                "extra_data": {
-                    "event": "model_test_predict_proba_missing",
-                    "model_type": type(model).__name__,
-                }
-            },
-        )
-        return
-
-    try:
-        if hasattr(model, "feature_names_in_"):
-            columns = list(model.feature_names_in_)
-            X = pd.DataFrame([np.zeros(len(columns))], columns=columns)
-
-        elif hasattr(model, "n_features_in_"):
-            X = np.zeros((1, model.n_features_in_))
-
-        else:
-            logger.warning(
-                "Model test skipped, feature count unknown",
-                extra={
-                    "extra_data": {
-                        "event": "model_test_feature_count_unknown",
-                        "model_type": type(model).__name__,
-                    }
-                },
-            )
-            return
-
-        proba = model.predict_proba(X)
-
-        logger.info(
-            "Model prediction smoke test succeeded",
-            extra={
-                "extra_data": {
-                    "event": "model_test_success",
-                    "output_shape": list(proba.shape) if hasattr(proba, "shape") else None,
-                }
-            },
-        )
-
-        logger.debug("Output predict_proba : %s", proba)
-
     except Exception as exc:
-        logger.exception(
-            "Model prediction smoke test failed",
+        _THRESHOLD = 0.5
+
+        logger.warning(
+            "Threshold load failed, fallback applied",
             extra={
                 "extra_data": {
-                    "event": "model_test_exception",
+                    "event": "threshold_load_fallback",
+                    "threshold_path": str(threshold_path),
+                    "fallback_threshold": _THRESHOLD,
                     "error": str(exc),
                 }
             },
         )
 
+    if DEBUG_MODEL:
+        debug_threshold(_THRESHOLD)
+
+    return _THRESHOLD
+
 
 # =============================================================================
-# Reset cache (utile en tests)
+# Reset cache
 # =============================================================================
 
 def reset_model_cache() -> None:
     """
-    Réinitialise le cache local du modèle et du seuil.
-
-    Utile pour les tests unitaires ou pour forcer un rechargement.
+    Réinitialise les caches modèle / ONNX / seuil.
     """
-    global _MODEL, _THRESHOLD
+    global _MODEL, _ONNX_SESSION, _THRESHOLD
 
     _MODEL = None
+    _ONNX_SESSION = None
     _THRESHOLD = None
-
-    logger.info(
-        "Model and threshold cache reset",
-        extra={
-            "extra_data": {
-                "event": "model_cache_reset",
-            }
-        },
-    )
 
 
 # =============================================================================
@@ -385,13 +342,27 @@ def reset_model_cache() -> None:
 
 def get_model() -> Any:
     """
-    Retourne le modèle chargé en mémoire.
+    Retourne le backend chargé.
     """
     return load_model()
 
 
+def get_sklearn_model() -> Any:
+    """
+    Retourne explicitement le modèle sklearn.
+    """
+    return load_sklearn_model()
+
+
+def get_onnx_session() -> ort.InferenceSession:
+    """
+    Retourne explicitement la session ONNX.
+    """
+    return load_onnx_session()
+
+
 def get_threshold() -> float:
     """
-    Retourne le seuil chargé en mémoire.
+    Retourne le seuil métier.
     """
     return load_threshold()

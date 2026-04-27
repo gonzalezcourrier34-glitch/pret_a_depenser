@@ -113,7 +113,7 @@ class PredictResponse(StrictSchema):
     score: float
     model_version: str
     latency_ms: float
-
+    inference_latency_ms: float | None = None
 
 class PredictBatchItemResponse(StrictSchema):
     """
@@ -128,6 +128,7 @@ class PredictBatchItemResponse(StrictSchema):
     model_name: str | None = None
     model_version: str | None = None
     latency_ms: float | None = None
+    inference_latency_ms: float | None = None
     status: str
     error_message: str | None = None
 
@@ -143,6 +144,7 @@ class PredictBatchResponse(StrictSchema):
     model_name: str
     model_version: str
     batch_latency_ms: float
+    batch_inference_latency_ms: float | None = None
     items: list[PredictBatchItemResponse]
     selected_client_ids: list[int] | None = None
 
@@ -421,6 +423,7 @@ class PredictionHistoryItemResponse(StrictSchema):
     score: float | None = None
     threshold_used: float | None = None
     latency_ms: float | None = None
+    inference_latency_ms: float | None = None
     prediction_timestamp: datetime | None = None
     status_code: int | None = None
     error_message: str | None = None
@@ -462,6 +465,7 @@ class PredictionDetailResponse(BaseModel):
     score: float | None = None
     threshold_used: float | None = None
     latency_ms: float | None = None
+    inference_latency_ms: float | None = None
     input_data: dict[str, Any] | None = None
     output_data: dict[str, Any] | None = None
     prediction_timestamp: datetime | None = None

@@ -278,6 +278,7 @@ class PredictionLoggingService:
         score: float,
         threshold_used: float | None,
         latency_ms: float | None,
+        inference_latency_ms: float | None = None,
         input_data: dict[str, Any] | None,
         output_data: dict[str, Any] | None,
         client_id: int | None = None,
@@ -325,6 +326,7 @@ class PredictionLoggingService:
             score=float(score),
             threshold_used=None if threshold_used is None else float(threshold_used),
             latency_ms=None if latency_ms is None else float(latency_ms),
+            inference_latency_ms=None if inference_latency_ms is None else float(inference_latency_ms),
             input_data=safe_input_data,
             output_data=_to_json_compatible(output_data),
             prediction_timestamp=event_time,
@@ -361,6 +363,7 @@ class PredictionLoggingService:
         client_id: int | None = None,
         status_code: int | None = 500,
         latency_ms: float | None = None,
+        inference_latency_ms: float | None = None,
         event_time: datetime | None = None,
     ) -> PredictionLog:
         """
@@ -399,6 +402,7 @@ class PredictionLoggingService:
             score=0.0,
             threshold_used=None,
             latency_ms=latency_ms,
+            inference_latency_ms=inference_latency_ms,
             input_data=input_data,
             output_data={"status": "error", "message": error_message},
             client_id=client_id,
@@ -512,6 +516,7 @@ class PredictionLoggingService:
         score: float,
         threshold_used: float | None,
         latency_ms: float | None,
+        inference_latency_ms: float | None = None,
         client_id: int | None = None,
         write_feature_store_monitoring: bool = True,
         source_table: str | None = None,
@@ -580,6 +585,7 @@ class PredictionLoggingService:
             "model_name": model_name,
             "model_version": model_version,
             "latency_ms": None if latency_ms is None else float(latency_ms),
+            "inference_latency_ms": None if inference_latency_ms is None else float(inference_latency_ms),
             "source_csv": str(Path(APPLICATION_CSV).name),
         }
 
@@ -591,6 +597,7 @@ class PredictionLoggingService:
             score=score,
             threshold_used=threshold_used,
             latency_ms=latency_ms,
+            inference_latency_ms=inference_latency_ms,
             input_data=raw_input_data,
             output_data=final_output,
             client_id=client_id,

@@ -12,12 +12,15 @@ Mettre en place une couche de persistance dédiée aux prédictions afin de :
 - conserver les entrées et sorties de l'inférence
 - préparer le suivi des vérités terrain
 - historiser les features observées au moment de la prédiction
+- accélérer les requêtes fréquentes du dashboard grâce aux index
 
 Architecture
 ------------
 Dans la version actuelle du projet :
 - les features sont construites directement depuis les CSV
-- PostgreSQL sert uniquement à stocker les logs et le monitoring
+- PostgreSQL sert uniquement à stocker les logs, les vérités terrain
+  et les données de monitoring
+- le dashboard interroge ces tables via l'API FastAPI
 
 Tables créées
 -------------
@@ -28,6 +31,7 @@ Tables créées
 Notes
 -----
 - Les tables sont créées avec `CREATE TABLE IF NOT EXISTS`.
+- Les index sont créés avec `CREATE INDEX IF NOT EXISTS`.
 - Ce script est conçu pour PostgreSQL.
 - Les colonnes JSONB permettent de stocker des structures souples.
 """
@@ -38,6 +42,7 @@ import os
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 
 
 # =============================================================================
@@ -72,6 +77,7 @@ CREATE TABLE IF NOT EXISTS prediction_logs (
     score DOUBLE PRECISION NOT NULL,
     threshold_used DOUBLE PRECISION,
     latency_ms DOUBLE PRECISION,
+    inference_latency_ms DOUBLE PRECISION,
     input_data JSONB NOT NULL,
     output_data JSONB,
     prediction_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -112,7 +118,9 @@ CREATE TABLE IF NOT EXISTS prediction_features_snapshot (
 # =============================================================================
 
 CREATE_INDEXES_SQL = [
+    # -------------------------------------------------------------------------
     # prediction_logs
+    # -------------------------------------------------------------------------
     """
     CREATE INDEX IF NOT EXISTS idx_prediction_logs_client_id
     ON prediction_logs(client_id);
@@ -122,15 +130,30 @@ CREATE_INDEXES_SQL = [
     ON prediction_logs(model_name, model_version);
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_prediction_logs_model_version_time
+    ON prediction_logs(model_name, model_version, prediction_timestamp DESC);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_logs_client_time
+    ON prediction_logs(client_id, prediction_timestamp DESC);
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_prediction_logs_prediction_timestamp
-    ON prediction_logs(prediction_timestamp);
+    ON prediction_logs(prediction_timestamp DESC);
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_prediction_logs_status_code
     ON prediction_logs(status_code);
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_logs_errors_recent
+    ON prediction_logs(prediction_timestamp DESC)
+    WHERE error_message IS NOT NULL OR status_code >= 400;
+    """,
 
+    # -------------------------------------------------------------------------
     # ground_truth_labels
+    # -------------------------------------------------------------------------
     """
     CREATE INDEX IF NOT EXISTS idx_ground_truth_labels_request_id
     ON ground_truth_labels(request_id);
@@ -140,11 +163,17 @@ CREATE_INDEXES_SQL = [
     ON ground_truth_labels(client_id);
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_ground_truth_labels_client_observed
+    ON ground_truth_labels(client_id, observed_at DESC);
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_ground_truth_labels_observed_at
-    ON ground_truth_labels(observed_at);
+    ON ground_truth_labels(observed_at DESC);
     """,
 
+    # -------------------------------------------------------------------------
     # prediction_features_snapshot
+    # -------------------------------------------------------------------------
     """
     CREATE INDEX IF NOT EXISTS idx_prediction_features_snapshot_request_id
     ON prediction_features_snapshot(request_id);
@@ -154,31 +183,41 @@ CREATE_INDEXES_SQL = [
     ON prediction_features_snapshot(client_id);
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_prediction_features_snapshot_request_feature
+    ON prediction_features_snapshot(request_id, feature_name);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_prediction_features_snapshot_model_version_time
+    ON prediction_features_snapshot(model_name, model_version, snapshot_timestamp DESC);
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_prediction_features_snapshot_feature_name
     ON prediction_features_snapshot(feature_name);
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_prediction_features_snapshot_timestamp
-    ON prediction_features_snapshot(snapshot_timestamp);
+    ON prediction_features_snapshot(snapshot_timestamp DESC);
     """,
 ]
 
 
 # =============================================================================
-# Fonctions de création
+# Fonctions de création des tables
 # =============================================================================
 
-def create_prediction_logs_table(engine) -> None:
+def create_prediction_logs_table(engine: Engine) -> None:
     """
     Crée la table `prediction_logs`.
 
-    Cette table journalise chaque prédiction faite par l'API
-    avec les entrées, sorties, scores et métadonnées techniques.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
+    Cette table journalise chaque prédiction faite par l'API avec :
+    - l'identifiant de requête
+    - l'identifiant client
+    - le modèle utilisé
+    - la prédiction
+    - le score
+    - les temps de latence
+    - les données d'entrée et de sortie
+    - les éventuelles erreurs
     """
     with engine.begin() as connection:
         connection.execute(text(CREATE_PREDICTION_LOGS_TABLE_SQL))
@@ -186,17 +225,12 @@ def create_prediction_logs_table(engine) -> None:
     print("Table 'prediction_logs' créée ou déjà existante.")
 
 
-def create_ground_truth_labels_table(engine) -> None:
+def create_ground_truth_labels_table(engine: Engine) -> None:
     """
     Crée la table `ground_truth_labels`.
 
-    Cette table stocke les vérités terrain observées après coup
-    afin de comparer les prédictions aux résultats réels.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
+    Cette table stocke les vérités terrain observées après coup afin de
+    comparer les prédictions aux résultats réels.
     """
     with engine.begin() as connection:
         connection.execute(text(CREATE_GROUND_TRUTH_LABELS_TABLE_SQL))
@@ -204,18 +238,15 @@ def create_ground_truth_labels_table(engine) -> None:
     print("Table 'ground_truth_labels' créée ou déjà existante.")
 
 
-def create_prediction_features_snapshot_table(engine) -> None:
+def create_prediction_features_snapshot_table(engine: Engine) -> None:
     """
     Crée la table `prediction_features_snapshot`.
 
     Cette table stocke les features observées au moment de l'inférence,
-    une ligne par feature, afin de faciliter l'analyse de dérive
-    et les audits.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
+    une ligne par feature, afin de faciliter :
+    - l'audit d'une prédiction
+    - l'analyse de dérive
+    - la traçabilité fine du modèle
     """
     with engine.begin() as connection:
         connection.execute(text(CREATE_PREDICTION_FEATURES_SNAPSHOT_TABLE_SQL))
@@ -223,21 +254,22 @@ def create_prediction_features_snapshot_table(engine) -> None:
     print("Table 'prediction_features_snapshot' créée ou déjà existante.")
 
 
-def create_indexes(engine) -> None:
+def create_indexes(engine: Engine) -> None:
     """
-    Crée les index utiles pour accélérer les requêtes
-    sur les tables de prédiction.
+    Crée les index utiles pour accélérer les requêtes fréquentes.
 
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
+    Les index ciblent principalement :
+    - les recherches par request_id
+    - les recherches par client_id
+    - les historiques récents
+    - les filtres par modèle/version
+    - les snapshots de features par requête
     """
     with engine.begin() as connection:
         for sql in CREATE_INDEXES_SQL:
             connection.execute(text(sql))
 
-    print("Index créés ou déjà existants.")
+    print("Index de prédiction créés ou déjà existants.")
 
 
 # =============================================================================
@@ -251,14 +283,9 @@ TABLE_CREATORS = [
 ]
 
 
-def create_prediction_tables(engine) -> None:
+def create_prediction_tables(engine: Engine) -> None:
     """
     Crée l'ensemble des tables et index liés aux prédictions.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
     """
     for create_table in TABLE_CREATORS:
         create_table(engine)

@@ -1,7 +1,7 @@
 <h1 align="center">Système de scoring crédit avec API, monitoring et pipeline MLOps</h1>
 
 <p align="center">
-  <strong>Déploiement d’un modèle de machine learning en production avec traçabilité, monitoring et dashboard</strong>
+  <strong>Déploiement d’un modèle de machine learning en production avec traçabilité, monitoring, optimisation et dashboard</strong>
 </p>
 
 <p align="center">
@@ -26,51 +26,55 @@
   <li><a href="#section-2">2. Présentation du projet</a></li>
   <li><a href="#section-3">3. Objectifs du projet</a></li>
   <li><a href="#section-4">4. Architecture du système</a></li>
-  <li><a href="#section-5">5. Pipeline de préparation des données</a></li>
-  <li><a href="#section-6">6. Base de données et persistance</a></li>
-  <li><a href="#section-7">7. API de prédiction</a></li>
-  <li><a href="#section-8">8. Monitoring MLOps</a></li>
-  <li><a href="#section-9">9. Dashboard</a></li>
-  <li><a href="#section-10">10. Tables de prédiction</a></li>
-  <li><a href="#section-11">11. Tables de monitoring</a></li>
-  <li><a href="#section-12">12. Structure du projet</a></li>
-  <li><a href="#section-13">13. Tests</a></li>
-  <li><a href="#section-14">14. Infrastructure</a></li>
-  <li><a href="#section-15">15. Limites du prototype</a></li>
-  <li><a href="#section-16">16. Pistes d’amélioration</a></li>
-  <li><a href="#section-17">17. Configuration</a></li>
-  <li><a href="#section-18">18. Lancer le projet</a></li>
-  <li><a href="#section-19">19. Auteur</a></li>
-  <li><a href="#section-20">20. Licence</a></li>
+  <li><a href="#section-5">5. Structure du projet</a></li>
+  <li><a href="#section-6">6. Pipeline de préparation des données</a></li>
+  <li><a href="#section-7">7. Scripts de création des tables</a></li>
+  <li><a href="#section-8">8. Scripts d’exécution et scripts manuels</a></li>
+  <li><a href="#section-9">9. Base de données et persistance</a></li>
+  <li><a href="#section-10">10. API de prédiction</a></li>
+  <li><a href="#section-11">11. Monitoring MLOps</a></li>
+  <li><a href="#section-12">12. Dashboard Streamlit</a></li>
+  <li><a href="#section-13">13. Optimisation post-déploiement</a></li>
+  <li><a href="#section-14">14. Tests et qualité du code</a></li>
+  <li><a href="#section-15">15. CI/CD et déploiement</a></li>
+  <li><a href="#section-16">16. Configuration</a></li>
+  <li><a href="#section-17">17. Lancer le projet</a></li>
+  <li><a href="#section-18">18. Limites du prototype</a></li>
+  <li><a href="#section-19">19. Pistes d’amélioration</a></li>
+  <li><a href="#section-20">20. Auteur</a></li>
+  <li><a href="#section-21">21. Licence</a></li>
 </ul>
 
 <hr>
 
 <h2 id="section-1">1. Quick Start</h2>
 
-<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
-  Lancer rapidement le projet dans un environnement local reproductible, créer les tables PostgreSQL, préparer les features, démarrer l’API puis visualiser les résultats dans le dashboard.
+  Lancer rapidement le projet dans un environnement local reproductible, initialiser PostgreSQL, enregistrer le modèle actif, démarrer l’API FastAPI puis visualiser les prédictions et le monitoring dans le dashboard Streamlit.
 </div>
 
 <pre><code>git clone repo_url
-cd project
+cd pret_a_depenser
 cp .env.example .env
 docker compose up --build</code></pre>
 
-<p><strong>Puis :</strong></p>
+<p><strong>Ordre recommandé :</strong></p>
 
 <ol>
-  <li>initialiser la base PostgreSQL</li>
-  <li>exécuter le pipeline de préparation des données</li>
+  <li>créer les tables PostgreSQL nécessaires</li>
+  <li>vérifier que le modèle et les fichiers CSV sont disponibles</li>
+  <li>enregistrer le modèle actif dans le registre</li>
   <li>démarrer l’API FastAPI</li>
-  <li>ouvrir le dashboard Streamlit</li>
-  <li>faire une prédiction ou consulter le monitoring</li>
+  <li>démarrer le dashboard Streamlit</li>
+  <li>simuler des prédictions pour alimenter le monitoring</li>
+  <li>associer ou simuler les vérités terrain</li>
+  <li>consulter les métriques de latence, drift, performance et alertes</li>
 </ol>
 
-<div style="border-left: 5px solid #F5B041; background: #FFF8E8; padding: 14px 18px; margin: 18px 0;">
+<div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000000; padding: 14px 18px; margin: 18px 0;">
   <strong>Important</strong><br><br>
-  Le système de monitoring n’est réellement utile que si les prédictions sont journalisées en base et si les tables de suivi sont créées au préalable.
+  Le monitoring devient exploitable uniquement lorsque des prédictions sont journalisées en base. Les simulations de prédictions servent donc à générer de la donnée de production simulée.
 </div>
 
 <hr>
@@ -78,25 +82,27 @@ docker compose up --build</code></pre>
 <h2 id="section-2">2. Présentation du projet</h2>
 
 <p>
-Dans ce projet, j’ai conçu un système complet de <strong>scoring crédit en production</strong>, capable de servir un modèle de machine learning via une API, de stocker les prédictions dans PostgreSQL et de suivre le comportement du modèle à travers un dispositif de monitoring MLOps.
+Ce projet met en place un système complet de <strong>scoring crédit en production</strong>. Le modèle de machine learning est exposé via une API FastAPI, les prédictions sont historisées dans PostgreSQL, et un dashboard Streamlit permet de suivre les métriques métier, techniques et MLOps.
 </p>
 
 <p>
-L’objectif est de ne pas se limiter à la modélisation, mais d’implémenter une chaîne plus réaliste de mise en production, avec :
+L’objectif n’est pas seulement de prédire un risque de défaut, mais de construire une chaîne complète de mise en production :
 </p>
 
 <ul>
-  <li>une API de prédiction sécurisée</li>
-  <li>une base PostgreSQL pour stocker les données techniques et métier</li>
-  <li>un pipeline de préparation de features aligné sur le modèle</li>
-  <li>un historique des prédictions</li>
-  <li>un système de monitoring dédié aux dérives, performances et alertes</li>
-  <li>un dashboard de consultation et de pilotage</li>
+  <li>chargement des données client depuis CSV</li>
+  <li>construction des features attendues par le modèle</li>
+  <li>alignement strict des colonnes avec le modèle entraîné</li>
+  <li>exposition du modèle via une API FastAPI</li>
+  <li>sécurisation simple par clé API</li>
+  <li>journalisation des prédictions</li>
+  <li>stockage des snapshots de features</li>
+  <li>suivi du modèle actif dans un registre</li>
+  <li>monitoring de la performance, de la dérive et de la latence</li>
+  <li>dashboard Streamlit pour piloter et démontrer le système</li>
+  <li>optimisation post-déploiement du temps de réponse</li>
+  <li>pipeline CI/CD pour automatiser les contrôles</li>
 </ul>
-
-<p>
-Ce projet m’a permis de travailler sur une logique MLOps complète, allant de la structuration des données jusqu’au suivi d’un modèle en environnement applicatif. Les tables de prédiction et de monitoring sont créées par des scripts dédiés, avec index SQL pour faciliter les lectures côté dashboard. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
-</p>
 
 <hr>
 
@@ -105,208 +111,238 @@ Ce projet m’a permis de travailler sur une logique MLOps complète, allant de 
 <h3 style="color: #48C9B0;">Contexte</h3>
 
 <p>
-Dans le cadre de ce projet de scoring crédit, l’enjeu n’est pas seulement de produire une probabilité de défaut, mais de concevoir un système capable de <strong>servir, tracer et surveiller</strong> le modèle dans le temps.
-</p>
-
-<p>
-Un modèle peut perdre en qualité une fois déployé si les données changent, si les comportements clients évoluent ou si les distributions observées en production s’éloignent de celles du jeu d’entraînement.
+Dans un contexte de scoring crédit, un modèle peut perdre en fiabilité après son déploiement. Les profils clients peuvent évoluer, les distributions des variables peuvent dériver, et les performances observées en production peuvent s’éloigner des performances mesurées en phase d’entraînement.
 </p>
 
 <h3 style="color: #48C9B0;">Problématique</h3>
 
 <p>
-La difficulté consiste donc à construire une architecture capable de :
+Le problème consiste donc à construire un système capable de :
 </p>
 
 <ul>
-  <li>réaliser des prédictions de manière fiable</li>
-  <li>conserver les entrées et sorties utiles</li>
+  <li>servir une prédiction fiable</li>
+  <li>tracer les appels API</li>
+  <li>conserver les scores et les classes prédites</li>
+  <li>mesurer la latence API et le temps d’inférence</li>
   <li>suivre les versions de modèle</li>
-  <li>mesurer les dérives de données</li>
-  <li>suivre les métriques de performance</li>
-  <li>générer des alertes exploitables</li>
+  <li>analyser les dérives de données</li>
+  <li>rapprocher les prédictions des vérités terrain</li>
+  <li>générer des alertes de monitoring</li>
+  <li>documenter les optimisations réalisées après déploiement</li>
 </ul>
 
-<h3 style="color: #48C9B0;">Objectif du projet</h3>
+<h3 style="color: #48C9B0;">Objectif final</h3>
 
-<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
-  Avec ce projet, j’ai cherché à mettre en place un système de scoring crédit déployable, structuré et traçable, capable de journaliser les prédictions, de stocker les features observées en production et de suivre les signaux de dérive et de performance dans un cadre MLOps.
+  Construire un prototype MLOps complet, capable de déployer un modèle de scoring crédit, de tracer ses prédictions, de surveiller son comportement en production simulée et de démontrer une amélioration mesurable du temps de réponse.
 </div>
-
-<ul>
-  <li>servir un modèle via FastAPI</li>
-  <li>persister les données de prédiction dans PostgreSQL</li>
-  <li>structurer un pipeline de préparation des features</li>
-  <li>créer une couche de monitoring dédiée</li>
-  <li>préparer un dashboard d’analyse</li>
-  <li>séparer proprement les tables de prédiction et les tables de monitoring</li>
-</ul>
 
 <hr>
 
 <h2 id="section-4">4. Architecture du système</h2>
 
-<p>
-L’architecture repose sur plusieurs briques distinctes, chacune ayant un rôle clair dans la chaîne de mise en production.
-</p>
-
-<pre><code>CSV / Tables RAW
+<pre><code>CSV Home Credit
       │
       ▼
-Pipeline de préparation des données
+Service de chargement des données
       │
-      ├── création des tables brutes
-      ├── chargement des CSV
-      ├── agrégations temporaires
-      ├── création des features
-      ├── nettoyage
-      ├── enrichissement
-      ├── validation du schéma modèle
-      └── création de la table finale
+      ├── lecture du CSV source
+      ├── cache des données brutes
+      ├── construction des features
+      └── cache des features prêtes
       │
       ▼
-Modèle entraîné (joblib)
+Modèle entraîné joblib
       │
       ▼
 API FastAPI
       │
-      ├── prédiction
-      ├── log des requêtes
-      ├── snapshot des features
-      └── accès aux métadonnées modèle
+      ├── /predict
+      ├── /predict/batch
+      ├── /predict/simulate/real-sample
+      ├── /history
+      └── /monitoring
       │
       ▼
 PostgreSQL
       │
-      ├── tables de prédiction
-      ├── tables de monitoring
-      └── tables techniques intermédiaires
+      ├── prediction_logs
+      ├── prediction_features_snapshot
+      ├── ground_truth_labels
+      ├── model_registry
+      ├── drift_metrics
+      ├── evaluation_metrics
+      ├── feature_store_monitoring
+      └── alerts
       │
       ▼
-Dashboard Streamlit</code></pre>
-
-<p>
-Le pipeline global est orchestré par un script dédié qui enchaîne les étapes de création des features, nettoyage, enrichissement, validation et création des tables de prédiction et de monitoring. :contentReference[oaicite:2]{index=2}
-</p>
+Dashboard Streamlit
+      │
+      ├── prédictions
+      ├── historique
+      ├── monitoring
+      ├── drift
+      ├── alertes
+      └── registre modèle</code></pre>
 
 <hr>
 
-<h2 id="section-5">5. Pipeline de préparation des données</h2>
+<h2 id="section-5">5. Structure du projet</h2>
 
-<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+<pre><code>pret_a_depenser/
+│
+├── app/
+│   ├── api/
+│   │   ├── route_prediction.py
+│   │   ├── route_history.py
+│   │   ├── route_monitoring.py
+│   │   └── route_analyse.py
+│   │
+│   ├── core/
+│   │   ├── config.py
+│   │   ├── db.py
+│   │   ├── logging_config.py
+│   │   ├── model_features.py
+│   │   ├── schemas.py
+│   │   └── security.py
+│   │
+│   ├── crud/
+│   │   ├── monitoring.py
+│   │   └── prediction.py
+│   │
+│   ├── model/
+│   │   └── model_SQLalchemy.py
+│   │
+│   ├── services/
+│   │   ├── analysis_services/
+│   │   │   ├── evidently_service.py
+│   │   │   └── monitoring_evaluation_service.py
+│   │   │
+│   │   ├── loader_services/
+│   │   │   ├── data_loading_service.py
+│   │   │   └── model_loading_service.py
+│   │   │
+│   │   ├── features_builder_service.py
+│   │   ├── history_service.py
+│   │   ├── logging_service.py
+│   │   ├── monitoring_service.py
+│   │   ├── prediction_logging_service.py
+│   │   └── prediction_service.py
+│   │
+│   └── main.py
+│
+├── dashboard/
+│   ├── dashboard.py
+│   ├── dashboard_predictions.py
+│   ├── dashboard_monitoring.py
+│   ├── dashboard_systeme.py
+│   └── dashboard_request.py
+│
+├── scripts/
+│   ├── create_tables/
+│   │   ├── create_prediction_tables.py
+│   │   ├── create_monitoring_tables.py
+│   │   └── create_raw_tables.py
+│   │
+│   ├── manualy_run_scripts/
+│   │   ├── run_previeu_ground_truth.py
+│   │   ├── run_monitoring_analysis.py
+│   │   └── run_evidently_analysis.py
+│   │
+│   ├── register_model.py
+│   ├── benchmark_inference.py
+│   └── profile_inference.py
+│
+├── artifacts/
+│   ├── model.joblib
+│   ├── threshold.json
+│   ├── benchmark_baseline.csv
+│   ├── benchmark_optimized.csv
+│   └── profiling_report.txt
+│
+├── data/
+│   ├── application_test.csv
+│   └── autres fichiers Home Credit
+│
+├── docs/
+│   └── rapport_optimisation_inference.md
+│
+├── tests/
+│
+├── Dockerfile
+├── docker-compose.yml
+├── pyproject.toml
+├── uv.lock
+├── .env.example
+└── README.md</code></pre>
+
+<hr>
+
+<h2 id="section-6">6. Pipeline de préparation des données</h2>
+
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
-  Transformer les données brutes Home Credit en une table de features compatible avec le modèle entraîné, tout en conservant une logique claire, reproductible et découpée en étapes.
+  Transformer les données Home Credit en features exploitables par le modèle, tout en garantissant que les colonnes envoyées au modèle correspondent exactement aux features attendues.
 </div>
 
 <p>
-Le pipeline de préparation repose sur plusieurs scripts spécialisés. L’idée est de séparer la donnée brute, les agrégations intermédiaires, les enrichissements métier et la validation finale.
+Dans la version actuelle du projet, l’API fonctionne principalement à partir du CSV source et d’un service de chargement en mémoire. Les données sont chargées une seule fois, les features sont construites puis conservées en cache afin d’éviter de recalculer toute la préparation à chaque prédiction.
 </p>
 
-<pre><code>1. Création des tables RAW PostgreSQL
-2. Chargement des CSV dans la base
-3. Création des tables temporaires d’agrégation
-4. Création de la table de features client
-5. Nettoyage de la table de features
-6. Enrichissement avec ratios, logs, flags et interactions
-7. Vérification des features attendues par le modèle
-8. Création de la table finale prête pour la prédiction
-9. Création des tables de prédiction
-10. Création des tables de monitoring</code></pre>
+<ol>
+  <li>lecture du fichier défini par <code>APPLICATION_CSV</code></li>
+  <li>mise en cache des données brutes</li>
+  <li>construction des features via le service dédié</li>
+  <li>alignement avec <code>MODEL_FEATURES</code></li>
+  <li>mise en cache des features prêtes</li>
+  <li>réutilisation des features pour les prédictions unitaires et batch</li>
+</ol>
 
-<p>
-La structure brute de chargement des CSV vers PostgreSQL est explicitement définie dans un mapping fichier → table, avec insertion par chunks. :contentReference[oaicite:3]{index=3}
-</p>
-
-<p>
-Les tables temporaires d’agrégation servent de couche intermédiaire entre les tables RAW et la table finale de features client, notamment pour les historiques bureau, POS, cartes de crédit, paiements et previous applications. :contentReference[oaicite:4]{index=4}
-</p>
-
-<h3 style="color: #48C9B0;">Enrichissement métier</h3>
-
-<p>
-Une étape spécifique ajoute des variables dérivées utiles au modèle : conversions temporelles, flags de valeurs manquantes, ratios financiers, logs, compteurs documentaires et interactions entre scores externes. Cette logique est matérialisée dans la table <code>features_client_test_enriched</code>. :contentReference[oaicite:5]{index=5}
-</p>
+<h3 style="color: #48C9B0;">Exemples de features créées</h3>
 
 <ul>
   <li><code>AGE_YEARS</code></li>
   <li><code>EMPLOYED_YEARS</code></li>
   <li><code>CREDIT_INCOME_RATIO</code></li>
   <li><code>ANNUITY_INCOME_RATIO</code></li>
+  <li><code>ANNUITY_CREDIT_RATIO</code></li>
   <li><code>OVER_INDEBTED_40</code></li>
   <li><code>LOG_INCOME</code></li>
+  <li><code>LOG_CREDIT</code></li>
   <li><code>DOC_COUNT</code></li>
   <li><code>EXT_SOURCES_MEAN</code></li>
+  <li><code>EXT_SOURCES_MIN</code></li>
+  <li><code>EXT_SOURCES_MAX</code></li>
 </ul>
 
 <hr>
 
-<h2 id="section-6">6. Base de données et persistance</h2>
+<h2 id="section-7">7. Scripts de création des tables</h2>
 
-<p>
-J’ai utilisé <strong>PostgreSQL</strong> comme base centrale du projet afin de disposer d’une persistance robuste pour :
-</p>
-
-<ul>
-  <li>les données sources</li>
-  <li>les tables intermédiaires</li>
-  <li>les features finales</li>
-  <li>les logs de prédiction</li>
-  <li>les métriques de monitoring</li>
-  <li>les alertes</li>
-</ul>
-
-<p>
-Les tables RAW sont créées pour refléter fidèlement les schémas des fichiers CSV sources, avec conservation stricte des noms de colonnes d’origine. :contentReference[oaicite:6]{index=6}
-</p>
-
-<p>
-Cette séparation entre données brutes, features, prédictions et monitoring permet d’éviter le mélange des responsabilités et rend le système plus maintenable.
-</p>
-
-<hr>
-
-<h2 id="section-7">7. API de prédiction</h2>
-
-<p>
-L’API a été développée avec <strong>FastAPI</strong> afin d’exposer le modèle sous forme de service HTTP.
-</p>
-
-<p>
-Elle a pour rôle de :
-</p>
-
-<ul>
-  <li>recevoir les données d’entrée</li>
-  <li>vérifier la sécurité d’accès</li>
-  <li>appeler le modèle</li>
-  <li>retourner un score et une classe prédite</li>
-  <li>journaliser les informations utiles en base</li>
-</ul>
-
-<h3 style="color: #48C9B0;">Endpoints attendus</h3>
-
-<ul>
-  <li><code>/health</code> pour vérifier l’état du service</li>
-  <li><code>/predict</code> pour réaliser une prédiction</li>
-</ul>
-
-<p>
-Le projet est pensé pour tracer chaque appel de l’API, stocker les scores, conserver les données d’entrée et préparer le suivi des vérités terrain. C’est précisément le rôle des tables de prédiction créées dans le script dédié. :contentReference[oaicite:7]{index=7}
-</p>
-
-<hr>
-
-<h2 id="section-8">8. Monitoring MLOps</h2>
-
-<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
-  Suivre le comportement du modèle en production, détecter les dérives de données, mesurer les performances observées et centraliser les alertes dans une couche de monitoring dédiée.
+  Créer les tables PostgreSQL nécessaires à la journalisation des prédictions, au stockage des vérités terrain, au monitoring et au registre des modèles.
 </div>
 
-<p>
-Le monitoring repose sur plusieurs tables spécialisées :
-</p>
+<h3 style="color: #48C9B0;">Créer les tables de prédiction</h3>
+
+<pre><code>uv run python -m scripts.create_tables.create_prediction_tables</code></pre>
+
+<p>Tables concernées :</p>
+
+<ul>
+  <li><code>prediction_logs</code></li>
+  <li><code>prediction_features_snapshot</code></li>
+  <li><code>ground_truth_labels</code></li>
+</ul>
+
+<h3 style="color: #48C9B0;">Créer les tables de monitoring</h3>
+
+<pre><code>uv run python -m scripts.create_tables.create_monitoring_tables</code></pre>
+
+<p>Tables concernées :</p>
 
 <ul>
   <li><code>model_registry</code></li>
@@ -316,381 +352,437 @@ Le monitoring repose sur plusieurs tables spécialisées :
   <li><code>alerts</code></li>
 </ul>
 
-<p>
-Le script de création de ces tables met en place une couche de monitoring structurée, avec index SQL pour accélérer les requêtes de lecture. :contentReference[oaicite:8]{index=8}
-</p>
+<h3 style="color: #48C9B0;">Créer les tables RAW</h3>
 
-<h3 style="color: #48C9B0;">Axes suivis</h3>
+<pre><code>uv run python -m scripts.create_tables.create_raw_tables</code></pre>
 
-<ul>
-  <li><strong>versioning modèle</strong> : suivi des versions déployées et du modèle actif</li>
-  <li><strong>snapshot de features</strong> : valeurs observées en production</li>
-  <li><strong>dérive</strong> : métriques calculées par variable et par fenêtre temporelle</li>
-  <li><strong>performance</strong> : ROC AUC, PR AUC, précision, rappel, F1, F-beta, coût métier</li>
-  <li><strong>alertes</strong> : événements anormaux centralisés dans une table dédiée</li>
-</ul>
+<div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000000; padding: 14px 18px; margin: 18px 0;">
+  <strong>Note</strong><br><br>
+  Les tables RAW existent pour une architecture plus complète basée sur PostgreSQL. Dans la version priorisée actuellement, le projet fonctionne principalement à partir du CSV et du cache applicatif.
+</div>
 
 <hr>
 
-<h2 id="section-9">9. Dashboard</h2>
+<h2 id="section-8">8. Scripts d’exécution et scripts manuels</h2>
+
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
+  <strong>Objectif</strong><br><br>
+  Utiliser des scripts ponctuels pour enregistrer un modèle, associer les prédictions aux vérités terrain, déclencher une analyse de monitoring ou lancer une analyse Evidently.
+</div>
+
+<h3 style="color: #48C9B0;">Enregistrer le modèle actif</h3>
+
+<pre><code>docker exec -e PYTHONPATH=/app -e MODEL_VERSION=v1 -it fastapi_credit_api uv run python -m scripts.register_model</code></pre>
 
 <p>
-Le projet prévoit un dashboard <strong>Streamlit</strong> permettant de piloter les usages principaux du système.
+Ce script ajoute le modèle courant dans <code>model_registry</code> et permet à l’API ou au dashboard d’identifier le modèle actif.
 </p>
 
+<h3 style="color: #48C9B0;">Associer les prédictions à une vérité terrain simulée</h3>
+
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_previeu_ground_truth</code></pre>
+
 <p>
-Il doit permettre de :
+Ce script rapproche les prédictions existantes des labels disponibles ou simulés. Il permet ensuite de calculer des métriques de performance sur des données de production simulée.
 </p>
 
-<ul>
-  <li>faire une prédiction sur un client ou un JSON</li>
-  <li>consulter l’historique des prédictions</li>
-  <li>afficher les snapshots de features</li>
-  <li>visualiser les métriques de drift</li>
-  <li>consulter les métriques d’évaluation</li>
-  <li>lire les alertes ouvertes ou résolues</li>
-</ul>
+<h3 style="color: #48C9B0;">Lancer une analyse de monitoring</h3>
+
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_monitoring_analysis</code></pre>
 
 <p>
-L’idée est de proposer une vue exploitable à la fois pour l’usage démonstratif, le pilotage MLOps et la soutenance.
+Ce script calcule des métriques de performance, crée des alertes ou alimente les tables de monitoring.
+</p>
+
+<h3 style="color: #48C9B0;">Lancer une analyse Evidently</h3>
+
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_evidently_analysis</code></pre>
+
+<p>
+Ce script produit ou simule une analyse de dérive des données avec Evidently.
 </p>
 
 <hr>
 
-<h2 id="section-10">10. Tables de prédiction</h2>
+<h2 id="section-9">9. Base de données et persistance</h2>
 
 <p>
-Les tables de prédiction ont été conçues pour tracer les appels d’inférence et préparer le suivi post-déploiement. Elles sont créées par un script dédié. :contentReference[oaicite:9]{index=9}
+PostgreSQL est utilisé comme base centrale du projet.
 </p>
 
-<h3 style="color: #48C9B0;"><code>prediction_logs</code></h3>
+<p>Elle stocke :</p>
+
+<ul>
+  <li>les logs de prédiction</li>
+  <li>les snapshots de features</li>
+  <li>les vérités terrain</li>
+  <li>les métriques de dérive</li>
+  <li>les métriques de performance</li>
+  <li>les alertes</li>
+  <li>le registre des modèles</li>
+</ul>
 
 <p>
-Cette table journalise chaque appel de l’API avec :
+Cette séparation permet de distinguer les données opérationnelles, les données de monitoring et les métadonnées du modèle.
+</p>
+
+<hr>
+
+<h2 id="section-10">10. API de prédiction</h2>
+
+<p>
+L’API FastAPI expose le modèle de scoring crédit.
+</p>
+
+<h3 style="color: #48C9B0;">Endpoints principaux</h3>
+
+<ul>
+  <li><code>GET /health</code> : état général de l’API</li>
+  <li><code>GET /predict/health</code> : état du service de prédiction</li>
+  <li><code>POST /predict</code> : prédiction unitaire</li>
+  <li><code>POST /predict/batch</code> : prédiction batch</li>
+  <li><code>POST /predict/simulate/real-sample</code> : simulation de prédictions sur clients réels</li>
+  <li><code>GET /history/predictions</code> : historique des prédictions</li>
+  <li><code>GET /monitoring/summary</code> : synthèse du monitoring</li>
+  <li><code>GET /monitoring/models</code> : registre des modèles</li>
+  <li><code>GET /monitoring/alerts</code> : alertes de monitoring</li>
+</ul>
+
+<h3 style="color: #48C9B0;">Traçabilité</h3>
+
+<p>
+Chaque prédiction peut être journalisée avec :
 </p>
 
 <ul>
-  <li>un identifiant de requête</li>
-  <li>un client éventuel</li>
-  <li>le nom et la version du modèle</li>
+  <li>le score prédit</li>
   <li>la classe prédite</li>
-  <li>le score</li>
   <li>le seuil utilisé</li>
-  <li>la latence</li>
-  <li>les données d’entrée et de sortie</li>
-  <li>le code de statut et les erreurs éventuelles</li>
+  <li>la latence API</li>
+  <li>le temps d’inférence pur</li>
+  <li>les informations modèle</li>
+  <li>les éventuelles erreurs</li>
 </ul>
-
-<h3 style="color: #48C9B0;"><code>ground_truth_labels</code></h3>
-
-<p>
-Cette table stocke les vérités terrain observées a posteriori, afin de comparer les prédictions aux résultats réels.
-</p>
-
-<h3 style="color: #48C9B0;"><code>prediction_features_snapshot</code></h3>
-
-<p>
-Cette table conserve les features observées au moment de l’inférence, une ligne par feature, pour faciliter les analyses futures de dérive ou d’audit.
-</p>
 
 <hr>
 
-<h2 id="section-11">11. Tables de monitoring</h2>
+<h2 id="section-11">11. Monitoring MLOps</h2>
 
-<p>
-Les tables de monitoring sont séparées des tables de prédiction afin de distinguer clairement :
-</p>
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
+  <strong>Objectif</strong><br><br>
+  Suivre le comportement du modèle en production simulée : performance, dérive, latence, temps d’inférence, erreurs et alertes.
+</div>
+
+<h3 style="color: #48C9B0;">Métriques suivies</h3>
 
 <ul>
-  <li>les événements opérationnels liés à l’inférence</li>
-  <li>les indicateurs de suivi et de gouvernance du modèle</li>
+  <li>nombre total de prédictions</li>
+  <li>distribution des scores prédits</li>
+  <li>latence moyenne API</li>
+  <li>latence p95</li>
+  <li>latence p99</li>
+  <li>temps d’inférence moyen</li>
+  <li>taux d’erreur API</li>
+  <li>drift par feature</li>
+  <li>ROC AUC</li>
+  <li>PR AUC</li>
+  <li>précision</li>
+  <li>rappel</li>
+  <li>F1-score</li>
+  <li>F-beta score</li>
+  <li>coût métier</li>
 </ul>
 
-<h3 style="color: #48C9B0;"><code>model_registry</code></h3>
+<h3 style="color: #48C9B0;">Différence entre latence et inférence</h3>
 
 <p>
-Conserve l’historique des modèles, leurs métadonnées, leur stage, leur chemin source, leur date de déploiement et leur statut actif. :contentReference[oaicite:10]{index=10}
+La <strong>latence API</strong> mesure le temps total perçu par l’utilisateur.
 </p>
 
-<h3 style="color: #48C9B0;"><code>feature_store_monitoring</code></h3>
+<pre><code>requête reçue
++ préparation des données
++ prédiction du modèle
++ journalisation
++ réponse HTTP</code></pre>
 
 <p>
-Stocke les snapshots de features observées en production pour faciliter le suivi statistique.
+Le <strong>temps d’inférence</strong> mesure uniquement le temps passé dans le modèle.
 </p>
 
-<h3 style="color: #48C9B0;"><code>drift_metrics</code></h3>
+<pre><code>model.predict_proba(features)</code></pre>
 
 <p>
-Enregistre les métriques de dérive calculées par feature, par fenêtre de référence et fenêtre courante.
-</p>
-
-<h3 style="color: #48C9B0;"><code>evaluation_metrics</code></h3>
-
-<p>
-Stocke les métriques de performance agrégées sur une période donnée.
-</p>
-
-<h3 style="color: #48C9B0;"><code>alerts</code></h3>
-
-<p>
-Centralise les alertes générées par les règles de drift, de performance ou de monitoring.
+Les deux métriques sont utiles : la latence mesure l’expérience réelle utilisateur, tandis que le temps d’inférence permet d’identifier si le modèle lui-même est lent.
 </p>
 
 <hr>
 
-<h2 id="section-12">12. Structure du projet</h2>
-<pre><code>project/
-app/
-├── api/
-│   ├── route_prediction.py
-│   ├── route_history.py
-│   ├── route_monitoring.py
-│   └── route_analyse.py
-│
-├── core/
-│   ├── config.py
-│   ├── db.py
-│   ├── logging_config.py
-│   ├── model_features.py
-│   ├── schemas.py
-│   └── security.py
-│
-├── crud/
-│   ├── monitoring.py
-│   └── prediction.py
-│
-├── model/
-│   └── model_SQLalchemy.py
-│
-├── services/
-│   ├── analysis_services/
-│   │   ├── evidently_service.py
-│   │   └── monitoring_evaluation_service.py
-│   │
-│   ├── loader_services/
-│   │   ├── data_loading_service.py
-│   │   └── model_loading_service.py
-│   │
-│   ├── features_builder_service.py
-│   ├── history_service.py
-│   ├── logging_service.py
-│   ├── monitoring_service.py
-│   ├── prediction_logging_service.py
-│   └── prediction_service.py
-│
-└── main.py
-├── artifacts/
-├── data/
-├── tests/
-├── Dockerfile
-├── docker-compose.yml
-├── pyproject.toml
-├── .env.example
-└── README.md</code></pre>
-
-<pre><code>project/
-│
-├── app/
-│   ├── main.py
-│   ├── core/
-│   ├── routes/
-│   ├── services/
-│   ├── model/
-│   └── dashboard/
-│
-├── scripts/
-│   ├── create_raw_tables.py
-│   ├── load_csv_to_postgres.py
-│   ├── create_temp_feature_tables.py
-│   ├── create_prediction_tables.py
-│   ├── create_monitoring_tables.py
-│   ├── enrich_features_table.py
-│   └── verify_model_features.py
-│
-
+<h2 id="section-12">12. Dashboard Streamlit</h2>
 
 <p>
-Le pipeline de création des tables et de préparation des données est porté par plusieurs scripts spécialisés, ce qui rend l’ensemble plus lisible et plus maintenable. 
+Le dashboard Streamlit permet de visualiser et piloter le système.
 </p>
+
+<h3 style="color: #48C9B0;">Pages principales</h3>
+
+<ul>
+  <li>vue système</li>
+  <li>prédiction unitaire</li>
+  <li>simulation batch</li>
+  <li>historique des prédictions</li>
+  <li>détail d’une prédiction</li>
+  <li>monitoring global</li>
+  <li>métriques de dérive</li>
+  <li>métriques de performance</li>
+  <li>alertes</li>
+  <li>registre des modèles</li>
+</ul>
+
+<h3 style="color: #48C9B0;">Indicateurs affichés</h3>
+
+<ul>
+  <li>total des prédictions</li>
+  <li>latence moyenne</li>
+  <li>latence p95</li>
+  <li>latence p99</li>
+  <li>temps moyen d’inférence</li>
+  <li>taux d’erreur</li>
+  <li>distribution des scores</li>
+  <li>répartition des classes prédites</li>
+  <li>métriques de performance</li>
+  <li>alertes ouvertes</li>
+</ul>
 
 <hr>
 
-<h2 id="section-13">13. Tests</h2>
+<h2 id="section-13">13. Optimisation post-déploiement</h2>
+
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
+  <strong>Objectif</strong><br><br>
+  Analyser les performances réelles ou simulées du modèle après déploiement, identifier les goulots d’étranglement et tester des optimisations pour améliorer le temps de réponse.
+</div>
+
+<h3 style="color: #48C9B0;">Métriques utilisées</h3>
+
+<ul>
+  <li>latence moyenne API</li>
+  <li>latence p95</li>
+  <li>latence p99</li>
+  <li>temps d’inférence pur</li>
+  <li>temps de préparation des features</li>
+  <li>taux d’erreur</li>
+  <li>utilisation CPU / mémoire si disponible</li>
+</ul>
+
+<h3 style="color: #48C9B0;">Profiling</h3>
+
+<pre><code>uv run python -m cProfile -o artifacts/profile_inference.prof scripts/profile_inference.py</code></pre>
+
+<pre><code>uv run python scripts/profile_inference.py</code></pre>
+
+<h3 style="color: #48C9B0;">Benchmark baseline</h3>
+
+<pre><code>uv run python scripts/benchmark_inference.py --mode baseline</code></pre>
+
+<h3 style="color: #48C9B0;">Benchmark optimisé</h3>
+
+<pre><code>uv run python scripts/benchmark_inference.py --mode optimized</code></pre>
+
+<h3 style="color: #48C9B0;">Optimisations testées</h3>
+
+<ul>
+  <li>chargement du modèle une seule fois au démarrage de l’API</li>
+  <li>cache des données et des features client en mémoire</li>
+  <li>alignement strict des colonnes avant prédiction</li>
+  <li>réduction des conversions pandas inutiles</li>
+  <li>conversion des données numériques en <code>float32</code></li>
+  <li>journalisation du temps d’inférence pur</li>
+  <li>séparation entre latence API et inférence modèle</li>
+</ul>
+
+<h3 style="color: #48C9B0;">Rapport d’optimisation</h3>
+
+<pre><code>docs/rapport_optimisation_inference.md</code></pre>
+
+<hr>
+
+<h2 id="section-14">14. Tests et qualité du code</h2>
 
 <p>
-Le projet a vocation à intégrer des tests automatisés pour fiabiliser :
+Le projet intègre ou prévoit des tests automatisés sur :
 </p>
 
 <ul>
   <li>les endpoints FastAPI</li>
-  <li>les services de préparation des données</li>
-  <li>la cohérence des features avec le modèle</li>
-  <li>les accès à la base PostgreSQL</li>
-  <li>les requêtes utilisées par le dashboard</li>
+  <li>le chargement du modèle</li>
+  <li>l’alignement des features</li>
+  <li>les services de prédiction</li>
+  <li>les routes de monitoring</li>
+  <li>les appels du dashboard</li>
+  <li>les scripts de création de tables</li>
 </ul>
 
-<p>
-Une étape importante du projet consiste à vérifier l’alignement exact entre la table SQL de features et la liste attendue par le modèle. Le script de vérification compare les colonnes disponibles à la liste de features attendues et signale les manquants et les extras. :contentReference[oaicite:12]{index=12}
-</p>
+<h3 style="color: #48C9B0;">Lancer les tests</h3>
+
+<pre><code>uv run pytest</code></pre>
+
+<h3 style="color: #48C9B0;">Linting avec Ruff</h3>
+
+<pre><code>uv run ruff check .</code></pre>
+
+<div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000000; padding: 14px 18px; margin: 18px 0;">
+  <strong>Attention</strong><br><br>
+  Si la commande Ruff échoue avec <code>Failed to spawn: ruff</code>, cela signifie que Ruff n’est pas installé dans l’environnement. Il faut l’ajouter dans les dépendances du projet.
+</div>
 
 <hr>
 
-<h2 id="section-14">14. Infrastructure</h2>
-
-<h3 style="color: #48C9B0;">PostgreSQL</h3>
+<h2 id="section-15">15. CI/CD et déploiement</h2>
 
 <p>
-PostgreSQL constitue la base centrale de persistance du projet.
+Le projet peut être contrôlé par GitHub Actions afin d’automatiser :
 </p>
-
-<h3 style="color: #48C9B0;">FastAPI</h3>
-
-<p>
-FastAPI expose le modèle via une API HTTP sécurisée et documentable.
-</p>
-
-<h3 style="color: #48C9B0;">Streamlit</h3>
-
-<p>
-Streamlit sert de couche d’interface pour consulter les prédictions et les indicateurs de monitoring.
-</p>
-
-<h3 style="color: #48C9B0;">Docker</h3>
-
-<p>
-L’application peut être conteneurisée pour obtenir un environnement reproductible et plus proche d’un déploiement réel.
-</p>
-
-<h3 style="color: #48C9B0;">MLflow</h3>
-
-<p>
-MLflow peut être utilisé pour la partie suivi expérimental et historique de modélisation, dans une logique cohérente avec l’approche MLOps du projet.
-</p>
-
-<hr>
-
-<h2 id="section-15">15. Limites du prototype</h2>
 
 <ul>
-  <li>le monitoring dépend de la qualité et du volume des données réellement journalisées</li>
-  <li>certaines métriques ne prennent pleinement sens qu’une fois la vérité terrain disponible</li>
-  <li>la détection de drift nécessite une bonne définition de la fenêtre de référence</li>
-  <li>le dashboard dépend fortement de la qualité des requêtes SQL et de la disponibilité des tables</li>
-  <li>la logique d’alerte peut encore être enrichie</li>
+  <li>l’installation de l’environnement</li>
+  <li>les tests unitaires</li>
+  <li>le linting</li>
+  <li>la construction Docker</li>
+  <li>le déploiement de la version optimisée</li>
 </ul>
+
+<h3 style="color: #48C9B0;">Pipeline attendu</h3>
+
+<pre><code>push GitHub
+      │
+      ▼
+GitHub Actions
+      │
+      ├── uv sync
+      ├── ruff check
+      ├── pytest
+      ├── build Docker
+      └── deploy</code></pre>
 
 <hr>
 
-<h2 id="section-16">16. Pistes d’amélioration</h2>
-
-<ul>
-  <li>ajout d’un monitoring automatisé planifié</li>
-  <li>calcul régulier de métriques de drift en batch</li>
-  <li>alimentation automatique des vérités terrain</li>
-  <li>gestion plus fine des modèles actifs et des versions</li>
-  <li>déploiement cloud</li>
-  <li>pipeline CI/CD complet</li>
-  <li>tests plus complets sur l’API et le dashboard</li>
-  <li>alertes temps réel</li>
-</ul>
-
-<hr>
-
-<h2 id="section-17">17. Configuration</h2>
+<h2 id="section-16">16. Configuration</h2>
 
 <h3 style="color: #48C9B0;">Prérequis</h3>
 
 <ul>
   <li>Python 3.11</li>
+  <li>uv</li>
+  <li>Docker</li>
+  <li>Docker Compose</li>
   <li>PostgreSQL</li>
-  <li>Docker et Docker Compose si conteneurisation</li>
-  <li>un modèle sérialisé au format joblib</li>
+  <li>un modèle sérialisé au format <code>joblib</code></li>
 </ul>
 
 <h3 style="color: #48C9B0;">Variables d’environnement</h3>
 
-<p>
-Créer un fichier <code>.env</code> avec les variables nécessaires au projet :
-</p>
-
 <pre><code>API_KEY=votre_token_api
-DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/credit_api
+DATABASE_URL=postgresql+psycopg://postgres:postgres@db:5432/credit_api
+
 MODEL_PATH=artifacts/model.joblib
 MODEL_NAME=credit_scoring_model
-MODEL_VERSION=v1</code></pre>
+MODEL_VERSION=v1
+MODEL_THRESHOLD=0.5
 
-<p>
-Les scripts de création des tables, de chargement des CSV et d’enrichissement dépendent tous de la variable <code>DATABASE_URL</code>. 
-</p>
+APPLICATION_CSV=data/application_test.csv
+
+DEBUG=True</code></pre>
 
 <hr>
 
-<h2 id="section-18">18. Lancer le projet</h2>
+<h2 id="section-17">17. Lancer le projet</h2>
 
-<h3 style="color: #48C9B0;">1. Créer les tables RAW</h3>
+<h3 style="color: #48C9B0;">1. Installer les dépendances</h3>
 
-<pre><code>uv run python scripts/create_raw_tables.py</code></pre>
+<pre><code>uv sync</code></pre>
 
-<h3 style="color: #48C9B0;">2. Charger les CSV dans PostgreSQL</h3>
+<h3 style="color: #48C9B0;">2. Démarrer les services Docker</h3>
 
-<pre><code>uv run python scripts/load_csv_to_postgres.py</code></pre>
+<pre><code>docker compose up --build</code></pre>
 
-<h3 style="color: #48C9B0;">3. Exécuter le pipeline de préparation</h3>
+<h3 style="color: #48C9B0;">3. Créer les tables de prédiction</h3>
 
-<pre><code>uv run python scripts/pipeline_all.py</code></pre>
+<pre><code>uv run python -m scripts.create_tables.create_prediction_tables</code></pre>
 
-<p>
-Selon ton arborescence réelle, adapte le nom du script d’orchestration si nécessaire. Le pipeline observé dans le projet enchaîne notamment la création des features, l’enrichissement, la vérification du schéma et la création des tables de prédiction et de monitoring. :contentReference[oaicite:14]{index=14}
-</p>
+<h3 style="color: #48C9B0;">4. Créer les tables de monitoring</h3>
 
-<h3 style="color: #48C9B0;">4. Lancer l’API</h3>
+<pre><code>uv run python -m scripts.create_tables.create_monitoring_tables</code></pre>
+
+<h3 style="color: #48C9B0;">5. Enregistrer le modèle actif</h3>
+
+<pre><code>docker exec -e PYTHONPATH=/app -e MODEL_VERSION=v1 -it fastapi_credit_api uv run python -m scripts.register_model</code></pre>
+
+<h3 style="color: #48C9B0;">6. Lancer l’API en local</h3>
 
 <pre><code>uv run uvicorn app.main:app --reload</code></pre>
 
-<h3 style="color: #48C9B0;">5. Lancer le dashboard</h3>
+<h3 style="color: #48C9B0;">7. Lancer le dashboard</h3>
 
 <pre><code>uv run streamlit run dashboard/dashboard.py</code></pre>
 
-<h3 style="color: #48C9B0;">6. Vérifier les services</h3>
+<h3 style="color: #48C9B0;">8. Simuler des prédictions</h3>
+
+<pre><code>POST /predict/simulate/real-sample?limit=200</code></pre>
+
+<h3 style="color: #48C9B0;">9. Générer ou associer les vérités terrain</h3>
+
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_previeu_ground_truth</code></pre>
+
+<h3 style="color: #48C9B0;">10. Lancer le monitoring</h3>
+
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_monitoring_analysis</code></pre>
+
+<h3 style="color: #48C9B0;">11. Lancer les benchmarks d’optimisation</h3>
+
+<pre><code>uv run python scripts/benchmark_inference.py --mode baseline
+uv run python scripts/benchmark_inference.py --mode optimized</code></pre>
+
+<hr>
+
+<h2 id="section-18">18. Limites du prototype</h2>
 
 <ul>
-  <li><strong>API FastAPI :</strong> <code>http://localhost:8000</code></li>
-  <li><strong>Swagger :</strong> <code>http://localhost:8000/docs</code></li>
-  <li><strong>Dashboard Streamlit :</strong> <code>http://localhost:8501</code></li>
+  <li>le monitoring dépend du volume de prédictions journalisées</li>
+  <li>les métriques de performance nécessitent une vérité terrain fiable</li>
+  <li>les données de production sont simulées dans le cadre du projet</li>
+  <li>le monitoring CPU/GPU reste basique si aucun outil système dédié n’est branché</li>
+  <li>les optimisations testées restent adaptées à un prototype local</li>
+  <li>le drift dépend fortement du choix de la fenêtre de référence</li>
+  <li>le dashboard dépend de la disponibilité de l’API FastAPI</li>
 </ul>
 
 <hr>
 
-<h2>Résumé rapide</h2>
+<h2 id="section-19">19. Pistes d’amélioration</h2>
 
-<pre><code>git clone repo_url
-cd project
-cp .env.example .env
-uv sync
-uv run python scripts/create_raw_tables.py
-uv run python scripts/load_csv_to_postgres.py
-uv run python scripts/pipeline_all.py
-uv run uvicorn app.main:app --reload</code></pre>
-
-<p>Puis :</p>
-
-<ol>
-  <li>ouvrir la documentation API</li>
-  <li>tester l’endpoint <code>/predict</code></li>
-  <li>ouvrir le dashboard</li>
-  <li>consulter les tables de prédiction et de monitoring</li>
-</ol>
+<ul>
+  <li>ajouter un vrai ordonnanceur de jobs de monitoring</li>
+  <li>automatiser le calcul périodique du drift</li>
+  <li>ajouter Prometheus et Grafana pour les métriques système</li>
+  <li>brancher un monitoring CPU / mémoire plus complet</li>
+  <li>tester ONNX Runtime pour optimiser l’inférence</li>
+  <li>ajouter un système de rollback modèle</li>
+  <li>améliorer la gestion des seuils de décision</li>
+  <li>déployer sur une infrastructure cloud</li>
+  <li>ajouter des tests de non-régression sur les prédictions</li>
+  <li>mettre en place des alertes automatiques</li>
+</ul>
 
 <hr>
 
-<h2 id="section-19">19. Auteur</h2>
+<h2 id="section-20">20. Auteur</h2>
 
 <p>
-Projet réalisé par <strong>Stéphane GONZALEZ</strong> dans le cadre d’un apprentissage autour du déploiement de modèles de machine learning, du monitoring MLOps et des architectures applicatives de scoring crédit.
+Projet réalisé par <strong>Stéphane GONZALEZ</strong> dans le cadre d’un apprentissage autour du déploiement de modèles de machine learning, du monitoring MLOps, de l’optimisation post-déploiement et des architectures applicatives de scoring crédit.
 </p>
 
 <hr>
 
-<h2 id="section-20">20. Licence</h2>
+<h2 id="section-21">21. Licence</h2>
 
 <p>Usage éducatif.</p>

@@ -84,7 +84,8 @@ MODEL_PATH = Path(os.getenv("MODEL_PATH", "artifacts/model.joblib"))
 MODEL_VERSION = os.getenv("MODEL_VERSION", "v1")
 THRESHOLD_PATH = Path(os.getenv("THRESHOLD_PATH", "artifacts/threshold.json"))
 DEBUG_MODEL = _get_bool("DEBUG_MODEL", "False")
-
+MODEL_BACKEND = os.getenv("MODEL_BACKEND", "sklearn").lower()
+ONNX_MODEL_PATH = os.getenv("ONNX_MODEL_PATH", "artifacts/model.onnx")
 
 # =============================================================================
 # Données CSV
@@ -105,6 +106,15 @@ SIMULATION_SOURCE_CSV = (
     else APPLICATION_CSV
 )
 
+# =============================================================================
+# HUGGING FACE
+# =============================================================================
+
+ASSETS_SOURCE = os.getenv("ASSETS_SOURCE", "auto")  # local | huggingface | auto
+
+HF_REPO_ID = os.getenv("HF_REPO_ID", "")
+HF_REPO_TYPE = os.getenv("HF_REPO_TYPE", "dataset")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 # =============================================================================
 # Monitoring

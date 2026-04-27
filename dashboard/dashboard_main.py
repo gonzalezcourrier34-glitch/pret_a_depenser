@@ -64,6 +64,7 @@ from dashboard_request import (
     get_prediction_history,
     metric_safe_number,
     run_evidently_analysis,
+    run_evidently_analysis_from_feature_store,
     run_monitoring_evaluation_analysis,
 )
 from dashboard_systeme import render_systeme_page
@@ -217,16 +218,57 @@ def get_prediction_features_snapshot_wrapper(request_id: str) -> dict[str, Any] 
 def get_ground_truth_by_request_id_wrapper(
     request_id: str,
     ground_truth_df: pd.DataFrame,
+    prediction_logs_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
-    Wrapper local pour récupérer une vérité terrain par request_id
-    à partir du DataFrame déjà chargé.
+    Récupère la vérité terrain associée à une prédiction.
+
+    Stratégie :
+    1. cherche dans le DataFrame déjà chargé
+    2. si rien, interroge l'API par request_id
+    3. si rien, retrouve le client_id et interroge l'API par client_id
     """
-    return get_ground_truth_by_request_id(
+    local_gt = get_ground_truth_by_request_id(
         request_id,
         ground_truth_df=ground_truth_df,
+        prediction_logs_df=prediction_logs_df,
     )
 
+    if isinstance(local_gt, pd.DataFrame) and not local_gt.empty:
+        return local_gt
+
+    api_gt = get_ground_truth_history(
+        base_url=API_URL,
+        api_key=API_KEY,
+        limit=50,
+        request_id=request_id,
+    )
+
+    if isinstance(api_gt, pd.DataFrame) and not api_gt.empty:
+        return api_gt
+
+    if (
+        prediction_logs_df is not None
+        and not prediction_logs_df.empty
+        and "request_id" in prediction_logs_df.columns
+        and "client_id" in prediction_logs_df.columns
+    ):
+        pred_row = prediction_logs_df[
+            prediction_logs_df["request_id"].astype(str) == str(request_id)
+        ]
+
+        if not pred_row.empty:
+            client_id = pred_row.iloc[0].get("client_id")
+
+            if client_id is not None and not pd.isna(client_id):
+                return get_ground_truth_history(
+                    base_url=API_URL,
+                    api_key=API_KEY,
+                    limit=50,
+                    client_id=int(client_id),
+                )
+
+    return pd.DataFrame()
 
 def run_evidently_analysis_wrapper(
     *,
@@ -295,7 +337,29 @@ def run_monitoring_evaluation_analysis_wrapper(
         cost_fp=cost_fp,
     )
 
+def run_evidently_analysis_from_feature_store_wrapper(
+    *,
+    model_name: str,
+    model_version: str | None = None,
+    source_table: str | None = None,
+    max_rows: int = 10000,
+) -> tuple[bool, Any]:
+    """
+    Wrapper local pour lancer une analyse Evidently depuis
+    les snapshots `feature_store_monitoring`.
 
+    Cette fonction injecte automatiquement API_URL et API_KEY.
+    """
+    safe_max_rows = min(int(max_rows), 10000)
+
+    return run_evidently_analysis_from_feature_store(
+        base_url=API_URL,
+        api_key=API_KEY,
+        model_name=model_name,
+        model_version=model_version,
+        source_table=source_table,
+        max_rows=safe_max_rows,
+    )
 # =============================================================================
 # Chargements communs via l'API
 # =============================================================================
@@ -555,9 +619,10 @@ elif page == "Prédictions / Traçabilité":
         call_predict_real_random_batch_api=call_predict_real_random_batch_api_wrapper,
         call_predict_fully_random_batch_api=call_predict_fully_random_batch_api_wrapper,
     )
-
 elif page == "Monitoring":
     render_monitoring_page(
+        base_url=API_URL,
+        api_key=API_KEY,
         monitoring_summary=monitoring_summary,
         monitoring_health=monitoring_health,
         prediction_logs_df=prediction_logs_df,
@@ -569,5 +634,6 @@ elif page == "Monitoring":
         feature_store_monitoring_df=feature_store_monitoring_df,
         metric_safe_number=metric_safe_number,
         run_evidently_analysis=run_evidently_analysis_wrapper,
+        run_evidently_analysis_from_feature_store=run_evidently_analysis_from_feature_store_wrapper,
         run_monitoring_evaluation_analysis=run_monitoring_evaluation_analysis_wrapper,
     )

@@ -45,6 +45,7 @@ Monitoring
 
 Analyse
 - POST /analyse/evidently/run
+- POST /analyse/evidently/run-from-feature-store
 - POST /analyse/evaluation/run
 
 Features
@@ -315,11 +316,24 @@ def _coerce_numeric_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.Data
 def _postprocess_prediction_logs(df: pd.DataFrame) -> pd.DataFrame:
     """
     Post-traitement standard des logs de prédiction.
+
+    Notes
+    -----
+    - latency_ms = temps total côté service : préparation + modèle + logging local.
+    - inference_latency_ms = temps pur du modèle : predict_proba uniquement.
     """
     df = _coerce_datetime_columns(df, ["prediction_timestamp", "created_at"])
     df = _coerce_numeric_columns(
         df,
-        ["client_id", "prediction", "score", "threshold", "threshold_used", "latency_ms"],
+        [
+            "client_id",
+            "prediction",
+            "score",
+            "threshold",
+            "threshold_used",
+            "latency_ms",
+            "inference_latency_ms",
+        ],
     )
 
     if "prediction_timestamp" in df.columns:
@@ -898,17 +912,47 @@ def get_ground_truth_by_request_id(
     base_url: str | None = None,
     api_key: str | None = None,
     ground_truth_df: pd.DataFrame | None = None,
+    prediction_logs_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
-    Retourne la vérité terrain pour une requête donnée.
-    """
-    if ground_truth_df is not None:
-        if ground_truth_df.empty or "request_id" not in ground_truth_df.columns:
-            return pd.DataFrame()
+    Retourne la vérité terrain associée à une requête.
 
-        return ground_truth_df[
-            ground_truth_df["request_id"].astype(str) == str(request_id)
-        ].copy()
+    Stratégie :
+    1. chercher par request_id exact
+    2. si rien trouvé, retrouver le client_id de la prédiction
+    3. chercher la vérité terrain par client_id
+    """
+    if ground_truth_df is not None and not ground_truth_df.empty:
+        gt_df = ground_truth_df.copy()
+
+        if "request_id" in gt_df.columns:
+            by_request = gt_df[
+                gt_df["request_id"].astype(str) == str(request_id)
+            ].copy()
+
+            if not by_request.empty:
+                return by_request
+
+        if (
+            prediction_logs_df is not None
+            and not prediction_logs_df.empty
+            and "request_id" in prediction_logs_df.columns
+            and "client_id" in prediction_logs_df.columns
+            and "client_id" in gt_df.columns
+        ):
+            pred_row = prediction_logs_df[
+                prediction_logs_df["request_id"].astype(str) == str(request_id)
+            ]
+
+            if not pred_row.empty:
+                client_id = pred_row.iloc[0].get("client_id")
+
+                if client_id is not None and not pd.isna(client_id):
+                    return gt_df[
+                        gt_df["client_id"].astype(str) == str(int(client_id))
+                    ].copy()
+
+        return pd.DataFrame()
 
     if base_url and api_key:
         return get_ground_truth_history(
@@ -919,7 +963,6 @@ def get_ground_truth_by_request_id(
         )
 
     return pd.DataFrame()
-
 
 # =============================================================================
 # Endpoints monitoring
@@ -1418,14 +1461,17 @@ def run_evidently_analysis(
     api_key: str,
     model_name: str,
     model_version: str | None = None,
-    reference_kind: str = "transformed",
-    current_kind: str = "transformed",
+    reference_kind: str = "raw",
+    current_kind: str = "raw",
     monitoring_dir: str | None = None,
     max_rows: int | None = 20000,
     timeout: int = DEFAULT_ANALYSIS_TIMEOUT,
 ) -> tuple[bool, Any]:
     """
     Lance une analyse Evidently via l'API FastAPI.
+
+    Cette analyse utilise les datasets de référence et courant chargés
+    depuis les caches applicatifs côté API.
     """
     params: dict[str, Any] = {
         "model_name": model_name,
@@ -1452,6 +1498,58 @@ def run_evidently_analysis(
     )
 
 
+def run_evidently_analysis_from_feature_store(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    model_version: str | None = None,
+    source_table: str | None = None,
+    max_rows: int = 1000,
+    timeout: int = DEFAULT_ANALYSIS_TIMEOUT,
+) -> tuple[bool, Any]:
+    """
+    Lance une analyse Evidently depuis les snapshots stockés dans
+    feature_store_monitoring.
+
+    Objectif
+    --------
+    Comparer la référence brute du modèle avec les features raw réellement
+    journalisées en production ou en simulation.
+
+    Cas d'usage
+    -----------
+    Après une simulation totalement aléatoire, utiliser par exemple :
+
+    source_table="random_simulation"
+
+    Flux
+    feature_store_monitoring
+    -> reconstruction d'un DataFrame raw wide côté API
+    -> analyse Evidently
+    -> persistance dans drift_metrics
+    """
+    params: dict[str, Any] = {
+        "model_name": model_name,
+        "max_rows": max_rows,
+    }
+
+    if model_version is not None:
+        params["model_version"] = model_version
+
+    if source_table is not None:
+        params["source_table"] = source_table
+
+    return call_api(
+        "/analyse/evidently/run-from-feature-store",
+        base_url=base_url,
+        api_key=api_key,
+        method="POST",
+        params=params,
+        timeout=timeout,
+    )
+
+
 def run_monitoring_evaluation_analysis(
     *,
     base_url: str,
@@ -1468,6 +1566,9 @@ def run_monitoring_evaluation_analysis(
 ) -> tuple[bool, Any]:
     """
     Lance une analyse d'évaluation monitoring via l'API FastAPI.
+
+    Cette analyse utilise les prédictions loguées et les vérités terrain
+    disponibles.
     """
     params: dict[str, Any] = {
         "model_name": model_name,

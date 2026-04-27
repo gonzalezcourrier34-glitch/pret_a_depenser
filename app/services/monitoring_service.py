@@ -36,6 +36,7 @@ from app.crud import monitoring as monitoring_crud
 from app.crud import prediction as prediction_crud
 from app.model.model_SQLalchemy import Alert, ModelRegistry
 
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -699,6 +700,109 @@ class MonitoringService:
 
         return payload
 
+    def get_feature_store_dataframe_for_drift(
+        self,
+        *,
+        model_name: str,
+        model_version: str | None = None,
+        source_table: str | None = None,
+        limit: int = 1000,
+    ) -> pd.DataFrame:
+        """
+        Reconstruit le dataset courant utilisé par Evidently à partir de
+        `feature_store_monitoring`.
+
+        Objectif
+        --------
+        Produire le `current_df` du monitoring de drift.
+
+        Principe
+        --------
+        La table `feature_store_monitoring` stocke les features au format long :
+
+        - request_id
+        - feature_name
+        - feature_value
+
+        Evidently attend un format wide :
+
+        - une ligne par request_id
+        - une colonne par feature
+
+        Cette méthode transforme donc les snapshots de production en DataFrame
+        exploitable par Evidently.
+
+        Important
+        ---------
+        Ce DataFrame doit avoir les mêmes noms de colonnes que le dataset de
+        référence utilisé dans `EvidentlyService`.
+
+        Si la référence est `reference_features_raw.parquet`, alors les snapshots
+        doivent contenir des features brutes / modèle-ready.
+
+        Si la référence est `reference_features_transformed.parquet`, alors les
+        snapshots doivent contenir les features transformées par le pipeline.
+        """
+        rows = monitoring_crud.list_feature_store_records(
+            self.db,
+            limit=limit * 500,
+            model_name=model_name,
+            model_version=model_version,
+            source_table=source_table,
+        )
+
+        if not rows:
+            return pd.DataFrame()
+
+        long_df = pd.DataFrame(
+            [
+                {
+                    "request_id": row.request_id,
+                    "feature_name": row.feature_name,
+                    "feature_value": row.feature_value,
+                }
+                for row in rows
+            ]
+        )
+
+        if long_df.empty:
+            return pd.DataFrame()
+
+        long_df = long_df.dropna(subset=["request_id", "feature_name"])
+
+        wide_df = (
+            long_df.pivot_table(
+                index="request_id",
+                columns="feature_name",
+                values="feature_value",
+                aggfunc="first",
+            )
+            .reset_index(drop=True)
+        )
+
+        for col in wide_df.columns:
+            wide_df[col] = pd.to_numeric(wide_df[col], errors="coerce")
+
+        wide_df = wide_df.dropna(axis=1, how="all")
+        wide_df = wide_df.dropna(axis=0, how="all")
+
+        logger.info(
+            "Feature store dataframe rebuilt for drift analysis",
+            extra={
+                "extra_data": {
+                    "event": "monitoring_service_feature_store_drift_dataframe_success",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "source_table": source_table,
+                    "rows": len(wide_df),
+                    "columns": len(wide_df.columns),
+                    "limit": limit,
+                    "columns_preview": list(wide_df.columns[:20]),
+                }
+            },
+        )
+
+        return wide_df.tail(limit).copy()
     # =========================================================================
     # Alertes
     # =========================================================================

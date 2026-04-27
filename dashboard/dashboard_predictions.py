@@ -330,9 +330,10 @@ def render_predictions_page(
         ground_truth_df,
         ["observed_at"],
     )
+
     ground_truth_df = _coerce_columns_to_numeric(
         ground_truth_df,
-        ["ground_truth", "client_id"],
+        ["true_label", "ground_truth", "y_true", "client_id"],
     )
 
     if "last_prediction_result" not in st.session_state:
@@ -932,7 +933,9 @@ def render_predictions_page(
                         gt = get_ground_truth_by_request_id(
                             selected,
                             ground_truth_df=ground_truth_df,
+                            prediction_logs_df=prediction_logs_df,
                         )
+
                     except Exception as e:
                         st.error(
                             f"Erreur lors de la récupération de la vérité terrain : {e}"
@@ -947,7 +950,9 @@ def render_predictions_page(
                             [
                                 "request_id",
                                 "client_id",
+                                "true_label",
                                 "ground_truth",
+                                "y_true",
                                 "label_source",
                                 "observed_at",
                                 "notes",

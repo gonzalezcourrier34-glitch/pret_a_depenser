@@ -2,13 +2,13 @@
 Module principal de l'application FastAPI.
 
 Ce module constitue le point d'entrée de l'API de scoring crédit.
-Il initialise l'application, configure le cycle de vie
-et enregistre les routes métier.
+Il initialise l'application, configure le cycle de vie et enregistre
+les routes métier.
 
 Architecture
 ------------
 - app.core.config : configuration
-- app.core.db : connexion base de données
+- app.core.db : connexion PostgreSQL
 - app.api : routes FastAPI
 - app.services : logique métier
 - app.crud : persistance PostgreSQL
@@ -16,10 +16,21 @@ Architecture
 
 Architecture actuelle
 ---------------------
-- les données de prédiction proviennent exclusivement du `.csv`
-- le modèle et le seuil sont chargés au démarrage
-- PostgreSQL sert uniquement au logging et au monitoring
+- les données de prédiction proviennent d'un CSV local ou téléchargé
+  depuis Hugging Face selon ASSETS_SOURCE
+- le modèle, le modèle ONNX éventuel et le seuil sont chargés au démarrage
+- PostgreSQL sert au logging, à l'historique et au monitoring
 - les analyses avancées passent par la route `/analyse`
+
+Ordre de démarrage
+------------------
+1. Charger les variables d'environnement
+2. Vérifier / télécharger les assets nécessaires
+3. Charger le modèle
+4. Charger le seuil métier
+5. Vérifier PostgreSQL
+6. Initialiser le cache CSV
+7. Démarrer l'API
 """
 
 from __future__ import annotations
@@ -34,8 +45,8 @@ from dotenv import load_dotenv
 # =============================================================================
 
 # Important :
-# Le fichier .env doit être chargé avant les imports applicatifs susceptibles
-# de lire la configuration au moment de l'import.
+# Le fichier .env doit être chargé avant les imports applicatifs qui lisent
+# la configuration au moment de l'import.
 load_dotenv()
 
 from fastapi import FastAPI
@@ -50,6 +61,9 @@ from app.core.config import DEBUG
 from app.core.db import SessionLocal
 from app.core.logging_config import setup_logging
 from app.services.loader_services.data_loading_service import init_full_data_cache
+from app.services.loader_services.huggingface_download_service import (
+    ensure_assets_available,
+)
 from app.services.loader_services.model_loading_service import (
     get_model,
     get_threshold,
@@ -99,25 +113,154 @@ OPENAPI_TAGS = [
 
 
 # =============================================================================
+# Helpers de démarrage
+# =============================================================================
+
+def _check_database_connection() -> None:
+    """
+    Vérifie que PostgreSQL est joignable.
+
+    Notes
+    -----
+    Cette fonction ne crée pas les tables.
+    Les tables doivent rester gérées par tes scripts SQL ou migrations dédiées.
+    """
+    db = SessionLocal()
+
+    try:
+        db.execute(text("SELECT 1"))
+
+        logger.info(
+            "PostgreSQL connection check succeeded",
+            extra={
+                "extra_data": {
+                    "event": "database_check_ok",
+                }
+            },
+        )
+
+    finally:
+        db.close()
+
+
+def _initialize_assets() -> None:
+    """
+    Vérifie que les fichiers nécessaires à l'API sont disponibles.
+
+    Selon `ASSETS_SOURCE`, cette étape peut :
+    - ne rien télécharger si tout est local
+    - télécharger uniquement les fichiers manquants
+    - forcer le téléchargement depuis Hugging Face
+    """
+    logger.info(
+        "Assets initialization started",
+        extra={
+            "extra_data": {
+                "event": "assets_init_begin",
+            }
+        },
+    )
+
+    ensure_assets_available()
+
+    logger.info(
+        "Assets initialization completed",
+        extra={
+            "extra_data": {
+                "event": "assets_init_success",
+            }
+        },
+    )
+
+
+def _initialize_model_and_threshold() -> None:
+    """
+    Charge le backend modèle configuré et le seuil métier.
+
+    Notes
+    -----
+    Le backend peut être :
+    - sklearn/joblib
+    - ONNX
+    selon la variable `MODEL_BACKEND`.
+    """
+    logger.info(
+        "Model initialization started",
+        extra={
+            "extra_data": {
+                "event": "model_init_begin",
+            }
+        },
+    )
+
+    get_model()
+
+    logger.info(
+        "Model loaded successfully",
+        extra={
+            "extra_data": {
+                "event": "model_loaded",
+            }
+        },
+    )
+
+    get_threshold()
+
+    logger.info(
+        "Threshold loaded successfully",
+        extra={
+            "extra_data": {
+                "event": "threshold_loaded",
+            }
+        },
+    )
+
+
+def _initialize_csv_cache() -> None:
+    """
+    Initialise le cache CSV en mémoire.
+
+    Ce cache permet ensuite :
+    - de retrouver les clients par SK_ID_CURR
+    - de construire les features prêtes modèle
+    - de lancer les simulations
+    """
+    logger.info(
+        "CSV cache initialization started",
+        extra={
+            "extra_data": {
+                "event": "csv_cache_init_begin",
+            }
+        },
+    )
+
+    init_full_data_cache(debug=False)
+
+    logger.info(
+        "CSV cache initialized successfully",
+        extra={
+            "extra_data": {
+                "event": "csv_cache_init_success",
+            }
+        },
+    )
+
+
+# =============================================================================
 # Lifespan
 # =============================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Gère le cycle de vie de l'application.
-
-    Notes
-    -----
-    Les tables PostgreSQL sont créées via des scripts SQL dédiés.
-    Aucun `create_all()` n'est exécuté ici afin d'éviter les écarts
-    entre SQLAlchemy et la structure réelle de la base.
+    Gère le cycle de vie de l'application FastAPI.
 
     Au démarrage, l'application vérifie :
-    - l'accès au modèle de scoring
+    - la présence des assets nécessaires
+    - le chargement du modèle
     - le chargement du seuil métier
-    - la disponibilité minimale de PostgreSQL
-    - le chargement en mémoire des données CSV métier
+    - la disponibilité de PostgreSQL
+    - le chargement du cache CSV
 
     Parameters
     ----------
@@ -142,59 +285,17 @@ async def lifespan(app: FastAPI):
     )
 
     try:
-        get_model()
-        logger.info(
-            "Model loaded successfully",
-            extra={
-                "extra_data": {
-                    "event": "model_loaded",
-                }
-            },
-        )
+        # 1. Les assets doivent exister avant tout chargement modèle / CSV.
+        _initialize_assets()
 
-        get_threshold()
-        logger.info(
-            "Threshold loaded successfully",
-            extra={
-                "extra_data": {
-                    "event": "threshold_loaded",
-                }
-            },
-        )
+        # 2. Chargement du backend modèle et du seuil.
+        _initialize_model_and_threshold()
 
-        db = SessionLocal()
-        try:
-            db.execute(text("SELECT 1"))
-            logger.info(
-                "PostgreSQL connection check succeeded",
-                extra={
-                    "extra_data": {
-                        "event": "database_check_ok",
-                    }
-                },
-            )
-        finally:
-            db.close()
+        # 3. Vérification minimale de PostgreSQL.
+        _check_database_connection()
 
-        logger.info(
-            "CSV cache initialization started",
-            extra={
-                "extra_data": {
-                    "event": "csv_cache_init_begin",
-                }
-            },
-        )
-
-        init_full_data_cache(debug=False)
-
-        logger.info(
-            "CSV cache initialized successfully",
-            extra={
-                "extra_data": {
-                    "event": "csv_cache_init_success",
-                }
-            },
-        )
+        # 4. Chargement en mémoire du CSV et des features.
+        _initialize_csv_cache()
 
         logger.info(
             "Application startup completed",
@@ -264,11 +365,6 @@ app.add_middleware(LoggingMiddleware)
 def root() -> RedirectResponse:
     """
     Redirige vers la documentation interactive de l'API.
-
-    Returns
-    -------
-    RedirectResponse
-        Redirection HTTP vers `/docs`.
     """
     return RedirectResponse(url="/docs")
 

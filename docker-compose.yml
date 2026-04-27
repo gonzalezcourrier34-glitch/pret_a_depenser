@@ -30,12 +30,32 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/credit_api
-      MODEL_PATH: /app/artifacts/model.joblib
+
+      # Modèle
+      MODEL_NAME: credit_scoring_model
       MODEL_VERSION: v1
+      MODEL_BACKEND: sklearn
+      MODEL_PATH: /app/artifacts/model.joblib
+      ONNX_MODEL_PATH: /app/artifacts/model.onnx
+      THRESHOLD_PATH: /app/artifacts/threshold.json
+
+      # Données
+      APPLICATION_CSV: /app/data/application_train.csv
       SIMULATION_SOURCE_CSV: /app/data/application_test.csv
       DATA_PATH: /app/data
+
+      # Monitoring
       MONITORING_DIR: /app/artifacts/monitoring
+
+      # Hugging Face
+      DOWNLOAD_ASSETS_FROM_HF: "true"
+      HF_REPO_ID: ${HF_REPO_ID}
+      HF_REPO_TYPE: ${HF_REPO_TYPE:-dataset}
+      HF_TOKEN: ${HF_TOKEN}
+
+      # Python
       PYTHONPATH: /app
+
     command:
       [
         "uv", "run", "uvicorn",
@@ -43,12 +63,25 @@ services:
         "--host", "0.0.0.0",
         "--port", "8000"
       ]
+
     ports:
       - "8000:8000"
+
     volumes:
       - ./data:/app/data
       - ./artifacts:/app/artifacts
       - ./app:/app/app
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "uv run python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/predict/health')\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   dashboard:
     build: .
@@ -58,15 +91,28 @@ services:
       postgres:
         condition: service_healthy
       api:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/credit_api
+
+      # Dashboard vers API Docker interne
       API_URL: http://api:8000
+      API_KEY: ${API_KEY}
       DEFAULT_LIMIT: 200
+
+      # Contexte modèle affiché côté dashboard
+      MODEL_NAME: credit_scoring_model
+      MODEL_VERSION: v1
+
+      # Données locales partagées
       DATA_PATH: /app/data
+      MONITORING_DIR: /app/artifacts/monitoring
+
+      # Python
       PYTHONPATH: /app
+
     command:
       [
         "uv", "run", "streamlit", "run",
@@ -74,8 +120,10 @@ services:
         "--server.address=0.0.0.0",
         "--server.port=8501"
       ]
+
     ports:
       - "8501:8501"
+
     volumes:
       - ./dashboard:/app/dashboard
       - ./artifacts:/app/artifacts

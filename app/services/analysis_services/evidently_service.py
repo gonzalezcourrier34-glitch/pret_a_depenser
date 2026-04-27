@@ -112,79 +112,205 @@ class EvidentlyService:
 
         return ref, cur, common_cols
 
-    def _safe_as_dict(
-        self,
-        report_object: object,
-    ) -> dict[str, Any]:
+    def _safe_as_dict(self, report_object: object) -> dict[str, Any]:
         """
         Convertit un objet Evidently en dictionnaire Python.
+
+        Compatible avec plusieurs versions Evidently :
+        - snapshot.json en propriété
+        - snapshot.json() en méthode
+        - dict()
+        - as_dict()
+        - model_dump()
         """
         if report_object is None:
             return {}
 
-        if hasattr(report_object, "as_dict"):
-            try:
-                result = report_object.as_dict()  # type: ignore[attr-defined]
-                if isinstance(result, dict):
-                    return result
-            except Exception:
-                pass
+        def _parse_json_like(value: Any) -> dict[str, Any]:
+            if isinstance(value, dict):
+                return value
 
-        if hasattr(report_object, "dict"):
-            try:
-                result = report_object.dict()  # type: ignore[attr-defined]
-                if isinstance(result, dict):
-                    return result
-            except Exception:
-                pass
+            if isinstance(value, bytes):
+                value = value.decode("utf-8")
 
-        if hasattr(report_object, "json"):
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return {}
+
+                try:
+                    parsed = json.loads(text)
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    return {}
+
+            return {}
+
+        # as_dict ou as_dict(include_render=False)
+        attr = getattr(report_object, "as_dict", None)
+        if attr is not None:
             try:
-                raw = report_object.json()  # type: ignore[attr-defined]
-                if isinstance(raw, str):
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, dict):
+                result = attr(include_render=False) if callable(attr) else attr
+                parsed = _parse_json_like(result)
+                if parsed:
+                    return parsed
+            except TypeError:
+                try:
+                    result = attr() if callable(attr) else attr
+                    parsed = _parse_json_like(result)
+                    if parsed:
                         return parsed
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # dict
+        attr = getattr(report_object, "dict", None)
+        if attr is not None:
+            try:
+                result = attr() if callable(attr) else attr
+                parsed = _parse_json_like(result)
+                if parsed:
+                    return parsed
+            except Exception:
+                pass
+
+        # model_dump
+        attr = getattr(report_object, "model_dump", None)
+        if attr is not None:
+            try:
+                result = attr() if callable(attr) else attr
+                parsed = _parse_json_like(result)
+                if parsed:
+                    return parsed
+            except Exception:
+                pass
+
+        # json : attention, selon Evidently ça peut être une propriété, pas une méthode
+        attr = getattr(report_object, "json", None)
+        if attr is not None:
+            try:
+                result = attr() if callable(attr) else attr
+                parsed = _parse_json_like(result)
+                if parsed:
+                    return parsed
+            except Exception:
+                pass
+
+        # _repr_json_
+        attr = getattr(report_object, "_repr_json_", None)
+        if attr is not None:
+            try:
+                result = attr() if callable(attr) else attr
+                parsed = _parse_json_like(result)
+                if parsed:
+                    return parsed
             except Exception:
                 pass
 
         return {}
-
+    
     def _find_dataset_drift_block(
         self,
         report_dict: dict[str, Any],
     ) -> dict[str, Any]:
         """
-        Cherche un bloc de résumé dataset-level dans le rapport.
+        Recherche le vrai bloc dataset-level Evidently.
+
+        Priorité :
+        1. métrique Evidently récente DriftedColumnsCount
+        2. anciens formats contenant number_of_drifted_columns / share_of_drifted_columns
         """
         if not isinstance(report_dict, dict):
             return {}
 
-        for key in ["metrics", "results", "metric_results"]:
-            metrics = report_dict.get(key)
+        metrics = report_dict.get("metrics", [])
 
-            if isinstance(metrics, list):
-                for item in metrics:
-                    if not isinstance(item, dict):
-                        continue
+        if isinstance(metrics, list):
+            for metric in metrics:
+                if not isinstance(metric, dict):
+                    continue
 
-                    text = json.dumps(item, ensure_ascii=False).lower()
+                metric_name = str(metric.get("metric_name", ""))
+                config = metric.get("config", {})
+                value = metric.get("value", {})
 
-                    if "drift" in text and (
-                        "number_of_drifted_columns" in text
-                        or "share_of_drifted_columns" in text
-                        or "dataset_drift" in text
-                    ):
-                        return item
+                config_type = ""
+                if isinstance(config, dict):
+                    config_type = str(config.get("type", ""))
 
-        text = json.dumps(report_dict, ensure_ascii=False).lower()
-        if (
-            "number_of_drifted_columns" in text
-            or "share_of_drifted_columns" in text
-        ):
-            return report_dict
+                if (
+                    "DriftedColumnsCount" in metric_name
+                    or "DriftedColumnsCount" in config_type
+                ):
+                    if isinstance(value, dict):
+                        block = {
+                            "number_of_drifted_columns": value.get("count"),
+                            "share_of_drifted_columns": value.get("share"),
+                            "drift_detected": self._coerce_float(value.get("count"), 0.0) > 0,
+                            "raw_metric": metric,
+                        }
 
-        return {}
+                        logger.info(
+                            "Dataset drift block found from DriftedColumnsCount",
+                            extra={
+                                "extra_data": {
+                                    "event": "evidently_find_dataset_drift_block_from_metrics",
+                                    "found": True,
+                                    "number_of_drifted_columns": block["number_of_drifted_columns"],
+                                    "share_of_drifted_columns": block["share_of_drifted_columns"],
+                                }
+                            },
+                        )
+
+                        return block
+
+        target_keys = {
+            "number_of_drifted_columns",
+            "share_of_drifted_columns",
+            "dataset_drift",
+            "drift_detected",
+            "n_drifted_columns",
+            "drifted_columns",
+        }
+
+        def walk(obj: Any) -> dict[str, Any]:
+            if isinstance(obj, dict):
+                keys = set(obj.keys())
+
+                # Important : ne pas accepter un simple {"type", "drift_share"}
+                # car c'est souvent la config Evidently, pas le résultat.
+                if keys.intersection(target_keys):
+                    return obj
+
+                for value in obj.values():
+                    found = walk(value)
+                    if found:
+                        return found
+
+            elif isinstance(obj, list):
+                for item in obj:
+                    found = walk(item)
+                    if found:
+                        return found
+
+            return {}
+
+        block = walk(report_dict)
+
+        logger.info(
+            "Dataset drift block search completed",
+            extra={
+                "extra_data": {
+                    "event": "evidently_find_dataset_drift_block",
+                    "found": bool(block),
+                    "keys": list(block.keys()) if isinstance(block, dict) else [],
+                }
+            },
+        )
+
+        return block
 
     def _coerce_int(self, value: object, default: int = 0) -> int:
         """
@@ -438,9 +564,72 @@ class EvidentlyService:
 
         try:
             report = Report([DataDriftPreset()])
-            report.run(current_data=cur, reference_data=ref)
 
-            report_dict = self._safe_as_dict(report)
+            snapshot = report.run(
+                current_data=cur,
+                reference_data=ref,
+            )
+
+            # IMPORTANT :
+            # Avec les versions récentes d'Evidently, le résultat exploitable
+            # est souvent dans l'objet retourné par report.run(), donc `snapshot`.
+            # `_safe_as_dict()` doit gérer json comme méthode OU comme propriété.
+            report_dict = self._safe_as_dict(snapshot)
+
+            if not report_dict:
+                report_dict = self._safe_as_dict(report)
+
+            logger.info(
+                "Evidently objects debug",
+                extra={
+                    "extra_data": {
+                        "event": "evidently_objects_debug",
+                        "report_type": type(report).__name__,
+                        "snapshot_type": type(snapshot).__name__,
+                        "snapshot_is_none": snapshot is None,
+                        "snapshot_has_json": hasattr(snapshot, "json"),
+                        "snapshot_has_dict": hasattr(snapshot, "dict"),
+                        "snapshot_has_as_dict": hasattr(snapshot, "as_dict"),
+                        "snapshot_has_model_dump": hasattr(snapshot, "model_dump"),
+                        "report_has_json": hasattr(report, "json"),
+                        "report_has_dict": hasattr(report, "dict"),
+                        "report_has_as_dict": hasattr(report, "as_dict"),
+                        "report_dict_keys": (
+                            list(report_dict.keys())
+                            if isinstance(report_dict, dict)
+                            else []
+                        ),
+                    }
+                },
+            )
+
+            if not report_dict:
+                logger.warning(
+                    "Evidently report dictionary is empty after conversion attempts",
+                    extra={
+                        "extra_data": {
+                            "event": "evidently_report_empty",
+                            "reference_rows": len(ref),
+                            "current_rows": len(cur),
+                            "analyzed_columns_count": len(used_columns),
+                        }
+                    },
+                )
+
+            logger.info(
+                "Evidently report top-level structure",
+                extra={
+                    "extra_data": {
+                        "event": "evidently_report_structure_debug",
+                        "top_level_keys": (
+                            list(report_dict.keys())
+                            if isinstance(report_dict, dict)
+                            else []
+                        ),
+                        "preview": json.dumps(report_dict, default=str)[:3000],
+                    }
+                },
+            )
 
             logger.info(
                 "Evidently data drift report generated successfully",
@@ -491,54 +680,97 @@ class EvidentlyService:
         report: dict[str, Any],
     ) -> dict[str, Any]:
         """
-        Extrait un résumé dataset-level du drift.
+        Extrait un résumé global de dérive depuis le rapport Evidently.
+
+        Compatible avec :
+        - Evidently récent : {"metrics": [...], "tests": [...]}
+        - anciens formats : blocs contenant number_of_drifted_columns, dataset_drift, etc.
         """
+        metrics = report.get("metrics", [])
+
+        if isinstance(metrics, list):
+            for metric in metrics:
+                if not isinstance(metric, dict):
+                    continue
+
+                metric_name = str(metric.get("metric_name", ""))
+                config = metric.get("config", {})
+                value = metric.get("value", {})
+
+                config_type = ""
+                if isinstance(config, dict):
+                    config_type = str(config.get("type", ""))
+
+                is_drifted_columns_count = (
+                    "DriftedColumnsCount" in metric_name
+                    or "DriftedColumnsCount" in config_type
+                )
+
+                if is_drifted_columns_count and isinstance(value, dict):
+                    number_of_drifted_columns = self._coerce_int(
+                        value.get("count"),
+                        default=0,
+                    )
+                    share_of_drifted_columns = self._coerce_float(
+                        value.get("share"),
+                        default=0.0,
+                    )
+
+                    summary = {
+                        "drift_detected": number_of_drifted_columns > 0,
+                        "number_of_drifted_columns": number_of_drifted_columns,
+                        "share_of_drifted_columns": share_of_drifted_columns,
+                        "raw_summary": metric,
+                    }
+
+                    logger.info(
+                        "Extracted dataset drift summary from Evidently metrics",
+                        extra={
+                            "extra_data": {
+                                "event": "evidently_extract_dataset_summary_from_metrics_success",
+                                "drift_detected": summary["drift_detected"],
+                                "number_of_drifted_columns": summary["number_of_drifted_columns"],
+                                "share_of_drifted_columns": summary["share_of_drifted_columns"],
+                            }
+                        },
+                    )
+
+                    return summary
+
+        # Fallback pour les anciens formats Evidently
         block = self._find_dataset_drift_block(report)
-        raw_text = json.dumps(block, ensure_ascii=False)
 
-        number_of_drifted_columns: int | None = None
-        share_of_drifted_columns: float | None = None
-        drift_detected = False
+        number_of_drifted_columns = self._coerce_int(
+            block.get("number_of_drifted_columns")
+            or block.get("n_drifted_columns")
+            or block.get("drifted_columns"),
+            default=0,
+        )
 
-        for key in [
-            "number_of_drifted_columns",
-            "drifted_columns",
-            "n_drifted_columns",
-        ]:
-            if key in raw_text:
-                value = block.get(key)
-                if value is not None:
-                    parsed_value = self._coerce_int(value, default=-1)
-                    if parsed_value >= 0:
-                        number_of_drifted_columns = parsed_value
-                        break
+        share_of_drifted_columns = self._coerce_float(
+            block.get("share_of_drifted_columns")
+            or block.get("drift_share"),
+            default=0.0,
+        )
 
-        for key in [
-            "share_of_drifted_columns",
-            "drift_share",
-            "share_drifted_columns",
-        ]:
-            if key in raw_text:
-                value = block.get(key)
-                if value is not None:
-                    parsed_value = self._coerce_float(value, default=-1.0)
-                    if parsed_value >= 0:
-                        share_of_drifted_columns = parsed_value
-                        break
+        drift_detected_raw = (
+            block.get("dataset_drift")
+            if "dataset_drift" in block
+            else block.get("drift_detected")
+        )
 
-        for key in ["dataset_drift", "drift_detected", "drift"]:
-            value = block.get(key)
-            if isinstance(value, bool):
-                drift_detected = value
-                break
-
-        if number_of_drifted_columns is not None and number_of_drifted_columns > 0:
-            drift_detected = True
+        if isinstance(drift_detected_raw, bool):
+            drift_detected = drift_detected_raw
+        else:
+            drift_detected = (
+                number_of_drifted_columns > 0
+                or share_of_drifted_columns > 0
+            )
 
         summary = {
             "drift_detected": drift_detected,
-            "number_of_drifted_columns": number_of_drifted_columns or 0,
-            "share_of_drifted_columns": share_of_drifted_columns or 0.0,
+            "number_of_drifted_columns": number_of_drifted_columns,
+            "share_of_drifted_columns": share_of_drifted_columns,
             "raw_summary": block,
         }
 
@@ -550,11 +782,122 @@ class EvidentlyService:
                     "drift_detected": summary["drift_detected"],
                     "number_of_drifted_columns": summary["number_of_drifted_columns"],
                     "share_of_drifted_columns": summary["share_of_drifted_columns"],
+                    "raw_summary_keys": list(block.keys()) if isinstance(block, dict) else [],
                 }
             },
         )
 
         return summary
+    
+    def extract_feature_drift_rows_from_report(
+        self,
+        *,
+        report: dict[str, Any],
+        model_name: str,
+        model_version: str,
+        reference_window_start: object = None,
+        reference_window_end: object = None,
+        current_window_start: object = None,
+        current_window_end: object = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Extrait les métriques de drift par feature depuis le rapport Evidently.
+
+        Objectif
+        --------
+        Alimenter le dashboard avec :
+        - features les plus souvent en dérive
+        - top scores de drift par feature
+        - score moyen de drift dans le temps
+        """
+        rows: list[dict[str, Any]] = []
+
+        metrics = report.get("metrics", [])
+        if not isinstance(metrics, list):
+            return rows
+
+        for metric in metrics:
+            if not isinstance(metric, dict):
+                continue
+
+            metric_name = str(metric.get("metric_name", ""))
+            config = metric.get("config", {})
+            value = metric.get("value", {})
+
+            config_type = ""
+            feature_name = None
+
+            if isinstance(config, dict):
+                config_type = str(config.get("type", ""))
+
+                for key in ["column_name", "column", "feature_name"]:
+                    if config.get(key) is not None:
+                        feature_name = str(config.get(key))
+                        break
+
+            is_column_drift = (
+                "ColumnDriftMetric" in metric_name
+                or "ColumnDriftMetric" in config_type
+                or "ValueDrift" in metric_name
+                or "ValueDrift" in config_type
+            )
+
+            if not is_column_drift or not feature_name:
+                continue
+
+            if not isinstance(value, dict):
+                continue
+
+            drift_score = (
+                value.get("drift_score")
+                or value.get("score")
+                or value.get("statistic")
+                or value.get("p_value")
+            )
+
+            drift_detected = (
+                value.get("drift_detected")
+                or value.get("detected")
+                or False
+            )
+
+            metric_value = self._coerce_float(drift_score, default=0.0)
+
+            rows.append(
+                {
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "feature_name": feature_name,
+                    "metric_name": "feature_drift_score",
+                    "metric_value": metric_value,
+                    "threshold_value": None,
+                    "drift_detected": bool(drift_detected),
+                    "details": {
+                        "metric_name": metric_name,
+                        "config_type": config_type,
+                        "feature_name": feature_name,
+                        "raw_value": value,
+                    },
+                    "reference_window_start": reference_window_start,
+                    "reference_window_end": reference_window_end,
+                    "current_window_start": current_window_start,
+                    "current_window_end": current_window_end,
+                }
+            )
+
+        logger.info(
+            "Extracted feature-level drift metrics from Evidently report",
+            extra={
+                "extra_data": {
+                    "event": "evidently_extract_feature_metrics_success",
+                    "model_name": model_name,
+                    "model_version": model_version,
+                    "feature_rows": len(rows),
+                }
+            },
+        )
+
+        return rows
 
     def extract_drift_metrics_from_report(
         self,
@@ -592,6 +935,18 @@ class EvidentlyService:
             }
         ]
 
+        feature_rows = self.extract_feature_drift_rows_from_report(
+            report=report,
+            model_name=model_name,
+            model_version=model_version,
+            reference_window_start=reference_window_start,
+            reference_window_end=reference_window_end,
+            current_window_start=current_window_start,
+            current_window_end=current_window_end,
+        )
+
+        rows.extend(feature_rows)
+
         logger.info(
             "Extracted normalized drift metrics from Evidently report",
             extra={
@@ -600,6 +955,7 @@ class EvidentlyService:
                     "model_name": model_name,
                     "model_version": model_version,
                     "logged_metrics": len(rows),
+                    "feature_level_metrics": len(feature_rows),
                 }
             },
         )
@@ -609,6 +965,101 @@ class EvidentlyService:
     # =========================================================================
     # Orchestration complète
     # =========================================================================
+
+    def run_and_persist_data_drift_from_feature_store(
+        self,
+        *,
+        model_name: str,
+        model_version: str | None,
+        source_table: str | None = None,
+        max_rows: int = 1000,
+    ) -> dict[str, Any]:
+        """
+        Lance Evidently en comparant la référence modèle avec les snapshots
+        stockés dans feature_store_monitoring.
+        """
+        resolved_model_version = model_version or "unknown"
+
+        # IMPORTANT :
+        # La référence Evidently est stockée dans MONITORING_REFERENCE_CACHE.
+        # Si on lance Evidently depuis feature_store_monitoring, la route ne passe
+        # pas par run_and_persist_data_drift_analysis(), donc il faut initialiser
+        # explicitement ce cache ici.
+        init_monitoring_reference_cache(Path(MONITORING_DIR))
+
+        reference_df = get_reference_features_raw_df()
+        feature_names = list(reference_df.columns)
+
+        current_df = self.monitoring_service.get_feature_store_dataframe_for_drift(
+            model_name=model_name,
+            model_version=model_version,
+            source_table=source_table,
+            limit=max_rows,
+        )
+
+        common_cols_count = len(set(reference_df.columns).intersection(current_df.columns))
+
+        logger.info(
+            "Feature store dataframe reconstructed for Evidently",
+            extra={
+                "extra_data": {
+                    "event": "evidently_feature_store_dataframe_ready",
+                    "model_name": model_name,
+                    "model_version": resolved_model_version,
+                    "source_table": source_table,
+                    "reference_rows": len(reference_df),
+                    "current_rows": len(current_df),
+                    "reference_cols_count": len(reference_df.columns),
+                    "current_cols_count": len(current_df.columns),
+                    "common_cols_count": common_cols_count,
+                    "reference_columns_sample": list(reference_df.columns)[:20],
+                    "current_columns_sample": list(current_df.columns)[:20],
+                }
+            },
+        )
+
+        if current_df.empty:
+            return self._build_response_payload(
+                success=False,
+                message="Aucune donnée trouvée dans feature_store_monitoring.",
+                model_name=model_name,
+                model_version=resolved_model_version,
+                reference_kind="transformed",
+                current_kind="transformed",
+                logged_metrics=0,
+                reference_rows=len(reference_df),
+                current_rows=0,
+                analyzed_columns=[],
+                report={},
+            )
+        
+        if common_cols_count == 0:
+            return self._build_response_payload(
+                success=False,
+                message=(
+                    "Aucune colonne commune entre la référence transformée "
+                    "et les snapshots feature_store_monitoring. "
+                    "Vérifie que les features loguées ont les mêmes noms que les features modèle."
+                ),
+                model_name=model_name,
+                model_version=resolved_model_version,
+                reference_kind="raw",
+                current_kind="raw",
+                logged_metrics=0,
+                reference_rows=len(reference_df),
+                current_rows=len(current_df),
+                analyzed_columns=[],
+                report={},
+            )
+        
+        return self.run_and_persist_data_drift_from_dataframes(
+            model_name=model_name,
+            model_version=resolved_model_version,
+            reference_df=reference_df,
+            current_df=current_df,
+            feature_names=feature_names,
+            max_rows=max_rows,
+        )
 
     def run_and_persist_data_drift_analysis(
         self,

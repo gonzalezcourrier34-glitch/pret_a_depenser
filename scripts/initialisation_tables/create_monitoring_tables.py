@@ -13,13 +13,6 @@ Mettre en place une couche de monitoring structurée afin de :
 - historiser les métriques de performance
 - centraliser les alertes
 
-Architecture
-------------
-Dans la version actuelle du projet :
-- les features sont construites directement depuis les CSV
-- PostgreSQL sert uniquement à stocker les logs de prédiction
-  et les données de monitoring
-
 Tables créées
 -------------
 - model_registry
@@ -27,12 +20,6 @@ Tables créées
 - drift_metrics
 - evaluation_metrics
 - alerts
-
-Notes
------
-- Les tables sont créées avec `CREATE TABLE IF NOT EXISTS`.
-- Ce script est conçu pour PostgreSQL.
-- Les colonnes JSONB permettent de stocker des structures souples.
 """
 
 from __future__ import annotations
@@ -51,17 +38,17 @@ load_dotenv()
 
 
 # =============================================================================
-# Configuration de la base de données
+# Configuration
 # =============================================================================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL n'est pas défini dans les variables d'environnement")
+    raise ValueError("DATABASE_URL n'est pas défini dans les variables d'environnement.")
 
 
 # =============================================================================
-# SQL de création des tables de monitoring
+# SQL - Tables
 # =============================================================================
 
 CREATE_MODEL_REGISTRY_TABLE_SQL = """
@@ -162,11 +149,13 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 
 # =============================================================================
-# SQL de création des index
+# SQL - Index optimisés
 # =============================================================================
 
 CREATE_INDEXES_SQL = [
+    # -------------------------------------------------------------------------
     # model_registry
+    # -------------------------------------------------------------------------
     """
     CREATE INDEX IF NOT EXISTS idx_model_registry_name_version
     ON model_registry(model_name, model_version);
@@ -179,8 +168,18 @@ CREATE_INDEXES_SQL = [
     CREATE INDEX IF NOT EXISTS idx_model_registry_stage
     ON model_registry(stage);
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_model_registry_active_model
+    ON model_registry(model_name, is_active);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_model_registry_deployed_at
+    ON model_registry(deployed_at DESC);
+    """,
 
+    # -------------------------------------------------------------------------
     # feature_store_monitoring
+    # -------------------------------------------------------------------------
     """
     CREATE INDEX IF NOT EXISTS idx_feature_store_monitoring_request_id
     ON feature_store_monitoring(request_id);
@@ -195,10 +194,28 @@ CREATE_INDEXES_SQL = [
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_feature_store_monitoring_snapshot_timestamp
-    ON feature_store_monitoring(snapshot_timestamp);
+    ON feature_store_monitoring(snapshot_timestamp DESC);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_feature_store_model_version_time
+    ON feature_store_monitoring(model_name, model_version, snapshot_timestamp DESC);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_feature_store_request_feature
+    ON feature_store_monitoring(request_id, feature_name);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_feature_store_client_time
+    ON feature_store_monitoring(client_id, snapshot_timestamp DESC);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_feature_store_source_table
+    ON feature_store_monitoring(source_table);
     """,
 
+    # -------------------------------------------------------------------------
     # drift_metrics
+    # -------------------------------------------------------------------------
     """
     CREATE INDEX IF NOT EXISTS idx_drift_metrics_model_version
     ON drift_metrics(model_name, model_version);
@@ -213,10 +230,24 @@ CREATE_INDEXES_SQL = [
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_drift_metrics_computed_at
-    ON drift_metrics(computed_at);
+    ON drift_metrics(computed_at DESC);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_drift_metrics_model_time
+    ON drift_metrics(model_name, model_version, computed_at DESC);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_drift_metrics_model_feature
+    ON drift_metrics(model_name, model_version, feature_name);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_drift_metrics_detected_model
+    ON drift_metrics(model_name, model_version, drift_detected);
     """,
 
+    # -------------------------------------------------------------------------
     # evaluation_metrics
+    # -------------------------------------------------------------------------
     """
     CREATE INDEX IF NOT EXISTS idx_evaluation_metrics_model_version
     ON evaluation_metrics(model_name, model_version);
@@ -227,10 +258,16 @@ CREATE_INDEXES_SQL = [
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_evaluation_metrics_computed_at
-    ON evaluation_metrics(computed_at);
+    ON evaluation_metrics(computed_at DESC);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_evaluation_metrics_model_dataset_time
+    ON evaluation_metrics(model_name, model_version, dataset_name, computed_at DESC);
     """,
 
+    # -------------------------------------------------------------------------
     # alerts
+    # -------------------------------------------------------------------------
     """
     CREATE INDEX IF NOT EXISTS idx_alerts_status
     ON alerts(status);
@@ -241,119 +278,65 @@ CREATE_INDEXES_SQL = [
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_alerts_created_at
-    ON alerts(created_at);
+    ON alerts(created_at DESC);
+    """,
     """
+    CREATE INDEX IF NOT EXISTS idx_alerts_model_version_status
+    ON alerts(model_name, model_version, status);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_alerts_open_recent
+    ON alerts(created_at DESC)
+    WHERE status = 'open';
+    """,
 ]
 
 
 # =============================================================================
-# Fonctions de création des tables
+# Fonctions de création
 # =============================================================================
 
 def create_model_registry_table(engine) -> None:
-    """
-    Crée la table `model_registry`.
-
-    Cette table conserve l'historique des versions de modèles,
-    leurs métadonnées, leur stage et leur statut de déploiement.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
-    """
+    """Crée la table `model_registry`."""
     with engine.begin() as connection:
         connection.execute(text(CREATE_MODEL_REGISTRY_TABLE_SQL))
-
     print("Table 'model_registry' créée ou déjà existante.")
 
 
 def create_feature_store_monitoring_table(engine) -> None:
-    """
-    Crée la table `feature_store_monitoring`.
-
-    Cette table stocke les valeurs de features observées au moment
-    de l'inférence afin de faciliter le monitoring et l'analyse de dérive.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
-    """
+    """Crée la table `feature_store_monitoring`."""
     with engine.begin() as connection:
         connection.execute(text(CREATE_FEATURE_STORE_MONITORING_TABLE_SQL))
-
     print("Table 'feature_store_monitoring' créée ou déjà existante.")
 
 
 def create_drift_metrics_table(engine) -> None:
-    """
-    Crée la table `drift_metrics`.
-
-    Cette table enregistre les métriques de dérive calculées
-    par feature, par fenêtre temporelle et par version de modèle.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
-    """
+    """Crée la table `drift_metrics`."""
     with engine.begin() as connection:
         connection.execute(text(CREATE_DRIFT_METRICS_TABLE_SQL))
-
     print("Table 'drift_metrics' créée ou déjà existante.")
 
 
 def create_evaluation_metrics_table(engine) -> None:
-    """
-    Crée la table `evaluation_metrics`.
-
-    Cette table stocke les métriques agrégées de performance
-    d'un modèle sur une période donnée.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
-    """
+    """Crée la table `evaluation_metrics`."""
     with engine.begin() as connection:
         connection.execute(text(CREATE_EVALUATION_METRICS_TABLE_SQL))
-
     print("Table 'evaluation_metrics' créée ou déjà existante.")
 
 
 def create_alerts_table(engine) -> None:
-    """
-    Crée la table `alerts`.
-
-    Cette table centralise les alertes générées par les règles
-    de monitoring, de drift ou de performance.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
-    """
+    """Crée la table `alerts`."""
     with engine.begin() as connection:
         connection.execute(text(CREATE_ALERTS_TABLE_SQL))
-
     print("Table 'alerts' créée ou déjà existante.")
 
 
 def create_indexes(engine) -> None:
-    """
-    Crée les index utiles pour accélérer les requêtes de monitoring.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
-    """
+    """Crée les index de monitoring."""
     with engine.begin() as connection:
         for sql in CREATE_INDEXES_SQL:
             connection.execute(text(sql))
-
-    print("Index créés ou déjà existants.")
+    print("Index monitoring créés ou déjà existants.")
 
 
 # =============================================================================
@@ -370,14 +353,7 @@ TABLE_CREATORS = [
 
 
 def create_monitoring_tables(engine) -> None:
-    """
-    Crée l'ensemble des tables et index liés au monitoring.
-
-    Parameters
-    ----------
-    engine :
-        Moteur SQLAlchemy connecté à PostgreSQL.
-    """
+    """Crée toutes les tables de monitoring puis leurs index."""
     for create_table in TABLE_CREATORS:
         create_table(engine)
 
@@ -385,15 +361,7 @@ def create_monitoring_tables(engine) -> None:
 
 
 def main() -> None:
-    """
-    Point d'entrée du script.
-
-    Cette fonction :
-    1. établit la connexion à PostgreSQL,
-    2. crée les tables de monitoring,
-    3. crée les index,
-    4. affiche un message final.
-    """
+    """Point d'entrée du script."""
     print("Connexion à PostgreSQL...")
     engine = create_engine(DATABASE_URL, echo=False)
     print("Connexion établie.")
