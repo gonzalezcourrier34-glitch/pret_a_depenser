@@ -39,6 +39,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Literal
+from datetime import datetime
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -405,6 +406,7 @@ class EvidentlyService:
         try:
             from evidently import Report
             from evidently.presets import DataDriftPreset
+
         except Exception as exc:
             logger.exception(
                 "Failed to import Evidently",
@@ -432,9 +434,11 @@ class EvidentlyService:
                 reference_data=ref,
             )
 
-            output_dir = Path(MONITORING_DIR) / "reports"
+            output_dir = Path("artifacts") / "evidently" / "reports"
             output_dir.mkdir(parents=True, exist_ok=True)
-            html_path = output_dir / "data_drift_report.html"
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            html_path = output_dir / f"data_drift_report_{timestamp}.html"
 
             try:
                 report.save_html(str(html_path))

@@ -1,0 +1,28 @@
+site_name: Credit Scoring API - MLOps
+site_description: Documentation technique du projet de scoring crédit
+site_author: Stéphane
+
+theme:
+  name: material
+
+nav:
+  - Accueil: index.md
+  - API: api.md
+  - Rapport: rapport_optimisation_inference.md
+  - Travaux: travaux.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_root_heading: true
+  - autorefs
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences

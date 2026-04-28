@@ -1,4 +1,4 @@
-<h1 style="text-align:center;">Rapport d’optimisation de l’inférence</h1>
+<h1 style="text-align:center;">Rapport d’optimisation de la latence</h1>
 
 <div style="border-left: 6px solid #48C9B0; background:#f8fdfc; color:#000; padding:14px 18px; margin:18px 0;">
 <strong>Objectif</strong><br><br>
@@ -7,9 +7,9 @@ Je cherche à réduire la latence de prédiction du modèle de scoring crédit a
 
 ---
 
-<h3 style="color:#48C9B0;">Résultats</h3>
+<h3 style="color:#48C9B0;">Résultats comparatifs</h3>
 
-<h4 style="color:#48C9B0;">🔹 Backend sklearn (baseline)</h4>
+<h4 style="color:#48C9B0;">Backend sklearn (baseline)</h4>
 
 <ul>
 <li><strong>Latence moyenne :</strong> 40.59 ms</li>
@@ -18,7 +18,7 @@ Je cherche à réduire la latence de prédiction du modèle de scoring crédit a
 <li><strong>P99 :</strong> 112.70 ms</li>
 </ul>
 
-<h4 style="color:#48C9B0;">🔹 Backend ONNX (optimisé)</h4>
+<h4 style="color:#48C9B0;">Backend ONNX (optimisé)</h4>
 
 <ul>
 <li><strong>Latence moyenne :</strong> 39.89 ms</li>
@@ -29,7 +29,7 @@ Je cherche à réduire la latence de prédiction du modèle de scoring crédit a
 
 ---
 
-<h3 style="color:#48C9B0;">Gains</h3>
+<h3 style="color:#48C9B0;">Gains observés</h3>
 
 <ul>
 <li><strong>Gain moyen :</strong> ~1.7 %</li>
@@ -38,23 +38,25 @@ Je cherche à réduire la latence de prédiction du modèle de scoring crédit a
 </ul>
 
 <div style="border-left: 6px solid #48C9B0; background:#f8fdfc; color:#000; padding:14px 18px; margin:18px 0;">
-Même si le gain est faible, il est <strong>stable et reproductible</strong>.
+Le gain apporté par ONNX est faible mais <strong>stable et reproductible</strong>, ce qui valide la cohérence de l’optimisation.
 </div>
 
 ---
 
 <h3 style="color:#48C9B0;">Optimisations réalisées</h3>
 
-<p><strong>Celles effectuées dès le début :</strong></p>
+<h4 style="color:#48C9B0;">Optimisations structurelles</h4>
+
 <ul>
 <li>Mise en cache du modèle en mémoire</li>
 <li>Chargement unique des features (suppression des I/O répétées)</li>
 </ul>
 
-<p><strong>Celles pour l’optimisation :</strong></p>
+<h4 style="color:#48C9B0;">Optimisations de performance</h4>
+
 <ul>
-<li>Création d'index pour les tables de stockage d'information</li> 
-<li>Passage du backend modèle :
+<li>Création d’index en base de données</li>
+<li>Migration du backend modèle :
     <ul>
         <li>sklearn → ONNX Runtime</li>
     </ul>
@@ -75,7 +77,7 @@ Soit ≈ <strong>42 ms par requête</strong>
 
 <ul>
 <li>🔴 ~94 % → réseau / HTTP (<code>socket.recv_into</code>)</li>
-<li>🟢 ~6 % → logique Python + chargement données</li>
+<li>🟢 ~6 % → logique applicative (Python + chargement des données)</li>
 </ul>
 
 <h4 style="color:#48C9B0;">Extrait du profiling</h4>
@@ -91,49 +93,92 @@ chargement features → 0.073 s
 <h3 style="color:#48C9B0;">Interprétation</h3>
 
 <ul>
-<li>Le système est <strong>très efficace côté CPU</strong></li>
-<li>La latence est dominée par :
+<li>Le système est <strong>très performant côté CPU</strong></li>
+<li>La latence est majoritairement due à :
     <ul>
         <li>le transport HTTP</li>
         <li>la sérialisation JSON</li>
         <li>le traitement FastAPI</li>
     </ul>
 </li>
-<li>L’inférence modèle représente une part <strong>minoritaire</strong></li>
+<li>L’inférence du modèle représente une part <strong>minoritaire</strong> du temps total</li>
 </ul>
 
 ---
 
-<h3 style="color:#48C9B0;">⚠️ Impact réel de ONNX</h3>
+<h3 style="color:#48C9B0;">Impact réel de ONNX</h3>
 
 <div style="border-left: 6px solid #48C9B0; background:#f8fdfc; color:#000; padding:14px 18px; margin:18px 0;">
-Le gain ONNX est limité car le temps total est dominé par l’API et non par le modèle.
+Le gain apporté par ONNX est limité car le temps global est dominé par l’API et non par le modèle.
 </div>
 
 <ul>
 <li>Temps total API ≈ 40 ms</li>
-<li>Temps modèle pur ≈ quelques ms</li>
+<li>Temps d’inférence modèle ≈ quelques millisecondes</li>
 </ul>
 
 <p>Le gain ONNX est donc <strong>dilué dans le pipeline global</strong>.</p>
 
 ---
 
-<h3 style="color:#48C9B0;">Conclusion</h3>
+<h3 style="color:#48C9B0;">Analyse après optimisation du logging</h3>
+
+<div style="border-left: 6px solid #48C9B0; background:#f8fdfc; color:#000; padding:14px 18px; margin:18px 0;">
+<strong>Observation clé</strong><br><br>
+La réduction des logs applicatifs a un impact direct sur la latence serveur.
+</div>
 
 <ul>
-<li>Latence stable autour de <strong>40 ms</strong></li>
-<li>Système compatible <strong>temps réel</strong></li>
-<li>Architecture robuste et industrialisable</li>
+<li><strong>Total runs :</strong> 300</li>
+<li><strong>Succès :</strong> 300</li>
+<li><strong>Échecs :</strong> 0</li>
+</ul>
+
+<h4 style="color:#48C9B0;">Latence côté client</h4>
+
+<ul>
+<li>Moyenne : 39.38 ms</li>
+<li>Médiane : 35.38 ms</li>
+<li>P95 : 49.42 ms</li>
+<li>P99 : 120.93 ms</li>
+<li>Min : 29.18 ms</li>
+<li>Max : 122.41 ms</li>
+</ul>
+
+<h4 style="color:#48C9B0;">Latence côté API</h4>
+
+<ul>
+<li>Moyenne : 7.53 ms</li>
+<li>P95 : 9.22 ms</li>
 </ul>
 
 <div style="border-left: 6px solid #48C9B0; background:#f8fdfc; color:#000; padding:14px 18px; margin:18px 0;">
-Le passage à ONNX améliore légèrement les performances, mais le principal levier d’optimisation reste l’architecture API.
+<strong>Optimisation du logging applicatif</strong><br><br>
+Après réduction des logs HTTP et suppression du bruit lié aux healthchecks pendant les benchmarks :
+<ul>
+<li>Latence moyenne : <strong>8.71 ms → 7.53 ms</strong></li>
+<li>P95 : <strong>11.26 ms → 9.22 ms</strong></li>
+</ul>
+Soit une amélioration d’environ <strong>18 %</strong> sur la queue de distribution.
 </div>
 
 ---
 
-<h3 style="color:#48C9B0;">🔮 Pistes d’amélioration</h3>
+<h3 style="color:#48C9B0;">Conclusion</h3>
+
+<ul>
+<li>Latence globale stable autour de <strong>40 ms</strong></li>
+<li>Système compatible avec une utilisation <strong>temps réel</strong></li>
+<li>Architecture <strong>robuste et industrialisable</strong></li>
+</ul>
+
+<div style="border-left: 6px solid #48C9B0; background:#f8fdfc; color:#000; padding:14px 18px; margin:18px 0;">
+Le principal levier d’optimisation n’est pas le modèle, mais l’architecture API et les choix d’implémentation autour.
+</div>
+
+---
+
+<h3 style="color:#48C9B0;">Pistes d’amélioration</h3>
 
 <ul>
 <li>Mesurer séparément :
@@ -143,38 +188,13 @@ Le passage à ONNX améliore légèrement les performances, mais le principal le
         <li><code>total_ms</code></li>
     </ul>
 </li>
-<li>Profiling côté serveur</li>
-<li>Batch inference</li>
-<li>Réduction du coût JSON (gRPC / msgpack)</li>
+<li>Mettre en place un profiling côté serveur</li>
+<li>Implémenter du batch inference</li>
+<li>Réduire le coût de sérialisation (gRPC, msgpack)</li>
 </ul>
 
 ---
 
-<h3 style="color:#48C9B0;">🎤 Phrase clé (soutenance)</h3>
-
 <div style="border-left: 6px solid #48C9B0; background:#f8fdfc; color:#000; padding:14px 18px; margin:18px 0;">
-“Le passage à ONNX améliore légèrement la latence, mais le facteur dominant reste l’API elle-même. L’optimisation la plus impactante n’est pas le modèle, mais l’architecture autour.”
-</div>
-
-
-amelioration et diminution des logs en utilisation normale
-
-Total runs : 300
-Succès : 300
-Échecs : 0
-
-Latence client moyenne : 39.38 ms
-Médiane client : 35.38 ms
-P95 client : 49.42 ms
-P99 client : 120.93 ms
-Min client : 29.18 ms
-Max client : 122.41 ms
-
-Latence API moyenne : 7.53 ms
-P95 API : 9.22 ms
-
-<div style="border-left: 6px solid #48C9B0; background:#f8fdfc; color:#000; padding:14px 18px; margin:18px 0;">
-<strong>Optimisation du logging applicatif</strong><br><br>
-Après réduction des logs HTTP et suppression du bruit lié aux healthchecks pendant le benchmark, la latence serveur moyenne est passée de <strong>8.71 ms</strong> à <strong>7.53 ms</strong>.<br><br>
-Le P95 est passé de <strong>11.26 ms</strong> à <strong>9.22 ms</strong>, soit une amélioration d’environ <strong>18 %</strong> sur la queue de distribution.
+“Le passage à ONNX améliore légèrement la latence, mais le facteur dominant reste l’API. L’optimisation la plus impactante réside dans l’architecture globale du système.”
 </div>
