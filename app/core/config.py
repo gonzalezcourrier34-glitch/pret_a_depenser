@@ -56,8 +56,15 @@ def _get_float(name: str, default: str) -> float:
 # =============================================================================
 
 API_KEY = os.getenv("API_KEY", "")
-DEBUG = _get_bool("DEBUG", "False")
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 
+# =============================================================================
+# SUIVI POUR ANALYSE
+# =============================================================================
+
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+DEBUG_MODEL = os.getenv("DEBUG_MODEL", "False").lower() == "true"
+BENCHMARK_MODE = os.getenv("BENCHMARK_MODE", "False").lower() == "true"
 
 # =============================================================================
 # Base de données
@@ -83,7 +90,6 @@ MODEL_NAME = os.getenv("MODEL_NAME", "credit_scoring_model")
 MODEL_PATH = Path(os.getenv("MODEL_PATH", "artifacts/model.joblib"))
 MODEL_VERSION = os.getenv("MODEL_VERSION", "v1")
 THRESHOLD_PATH = Path(os.getenv("THRESHOLD_PATH", "artifacts/threshold.json"))
-DEBUG_MODEL = _get_bool("DEBUG_MODEL", "False")
 MODEL_BACKEND = os.getenv("MODEL_BACKEND", "sklearn").lower()
 ONNX_MODEL_PATH = os.getenv("ONNX_MODEL_PATH", "artifacts/model.onnx")
 

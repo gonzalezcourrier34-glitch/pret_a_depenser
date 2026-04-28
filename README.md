@@ -15,6 +15,7 @@
   <img src="https://img.shields.io/badge/GitHub_Actions-CI%2FCD-2088FF" alt="CI/CD">
   <img src="https://img.shields.io/badge/Monitoring-Production-orange" alt="Monitoring">
   <img src="https://img.shields.io/badge/MLOps-Credit_Scoring-purple" alt="MLOps">
+  <img src="https://img.shields.io/badge/ONNX_Runtime-Inference-005CED" alt="ONNX Runtime">
 </p>
 
 <hr>
@@ -51,7 +52,7 @@
 
 <div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
-  Lancer rapidement le projet dans un environnement local reproductible, initialiser PostgreSQL, enregistrer le modèle actif, démarrer l’API FastAPI puis visualiser les prédictions et le monitoring dans le dashboard Streamlit.
+  Lancer rapidement le projet dans un environnement local reproductible, initialiser PostgreSQL, enregistrer le modèle actif, démarrer l’API FastAPI puis visualiser les prédictions, la latence, le temps d’inférence et le monitoring dans le dashboard Streamlit.
 </div>
 
 <pre><code>git clone repo_url
@@ -63,19 +64,29 @@ docker compose up --build</code></pre>
 
 <ol>
   <li>créer les tables PostgreSQL nécessaires</li>
-  <li>vérifier que le modèle et les fichiers CSV sont disponibles</li>
+  <li>vérifier que les fichiers CSV sont disponibles</li>
+  <li>vérifier que le modèle <code>joblib</code> ou <code>ONNX</code> est disponible</li>
+  <li>configurer le backend avec <code>MODEL_BACKEND</code></li>
   <li>enregistrer le modèle actif dans le registre</li>
   <li>démarrer l’API FastAPI</li>
   <li>démarrer le dashboard Streamlit</li>
   <li>simuler des prédictions pour alimenter le monitoring</li>
   <li>associer ou simuler les vérités terrain</li>
-  <li>consulter les métriques de latence, drift, performance et alertes</li>
+  <li>consulter les métriques de latence, temps d’inférence, drift, performance et alertes</li>
 </ol>
 
 <div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000000; padding: 14px 18px; margin: 18px 0;">
   <strong>Important</strong><br><br>
   Le monitoring devient exploitable uniquement lorsque des prédictions sont journalisées en base. Les simulations de prédictions servent donc à générer de la donnée de production simulée.
 </div>
+
+<h3 style="color: #48C9B0;">URLs utiles</h3>
+
+<ul>
+  <li><code>http://127.0.0.1:8000/docs</code> : documentation Swagger de l’API</li>
+  <li><code>http://127.0.0.1:8501</code> : dashboard Streamlit</li>
+  <li><code>http://127.0.0.1:8000/predict/health</code> : healthcheck prédiction</li>
+</ul>
 
 <hr>
 
@@ -93,12 +104,13 @@ L’objectif n’est pas seulement de prédire un risque de défaut, mais de con
   <li>chargement des données client depuis CSV</li>
   <li>construction des features attendues par le modèle</li>
   <li>alignement strict des colonnes avec le modèle entraîné</li>
+  <li>support de deux backends d’inférence : <code>sklearn/joblib</code> et <code>ONNX Runtime</code></li>
   <li>exposition du modèle via une API FastAPI</li>
   <li>sécurisation simple par clé API</li>
   <li>journalisation des prédictions</li>
   <li>stockage des snapshots de features</li>
   <li>suivi du modèle actif dans un registre</li>
-  <li>monitoring de la performance, de la dérive et de la latence</li>
+  <li>monitoring de la performance, de la dérive, de la latence API et du temps d’inférence pur</li>
   <li>dashboard Streamlit pour piloter et démontrer le système</li>
   <li>optimisation post-déploiement du temps de réponse</li>
   <li>pipeline CI/CD pour automatiser les contrôles</li>
@@ -124,8 +136,10 @@ Le problème consiste donc à construire un système capable de :
   <li>servir une prédiction fiable</li>
   <li>tracer les appels API</li>
   <li>conserver les scores et les classes prédites</li>
-  <li>mesurer la latence API et le temps d’inférence</li>
+  <li>mesurer la latence API globale</li>
+  <li>mesurer le temps d’inférence pur du modèle avec <code>inference_latency_ms</code></li>
   <li>suivre les versions de modèle</li>
+  <li>basculer entre un backend <code>sklearn/joblib</code> et un backend <code>ONNX Runtime</code></li>
   <li>analyser les dérives de données</li>
   <li>rapprocher les prédictions des vérités terrain</li>
   <li>générer des alertes de monitoring</li>
@@ -136,7 +150,7 @@ Le problème consiste donc à construire un système capable de :
 
 <div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
-  Construire un prototype MLOps complet, capable de déployer un modèle de scoring crédit, de tracer ses prédictions, de surveiller son comportement en production simulée et de démontrer une amélioration mesurable du temps de réponse.
+  Construire un prototype MLOps complet, capable de déployer un modèle de scoring crédit, de tracer ses prédictions, de surveiller son comportement en production simulée, de comparer plusieurs backends d’inférence et de démontrer une amélioration mesurable du temps de réponse.
 </div>
 
 <hr>
@@ -154,7 +168,23 @@ Service de chargement des données
       └── cache des features prêtes
       │
       ▼
-Modèle entraîné joblib
+Service de chargement du modèle
+      │
+      ├── backend sklearn / joblib
+      ├── backend ONNX Runtime
+      ├── cache du modèle sklearn
+      ├── cache de la session ONNX
+      └── chargement du seuil métier
+      │
+      ▼
+Service de prédiction
+      │
+      ├── nettoyage des features
+      ├── appel predict_proba_with_backend
+      ├── calcul du score
+      ├── application du seuil
+      ├── mesure inference_latency_ms
+      └── retour prediction / score / seuil / temps d’inférence
       │
       ▼
 API FastAPI
@@ -183,6 +213,8 @@ Dashboard Streamlit
       ├── prédictions
       ├── historique
       ├── monitoring
+      ├── latence API
+      ├── temps d’inférence
       ├── drift
       ├── alertes
       └── registre modèle</code></pre>
@@ -222,6 +254,7 @@ Dashboard Streamlit
 │   │   │
 │   │   ├── loader_services/
 │   │   │   ├── data_loading_service.py
+│   │   │   ├── huggingface_download_service.py
 │   │   │   └── model_loading_service.py
 │   │   │
 │   │   ├── features_builder_service.py
@@ -234,37 +267,48 @@ Dashboard Streamlit
 │   └── main.py
 │
 ├── dashboard/
-│   ├── dashboard.py
-│   ├── dashboard_predictions.py
-│   ├── dashboard_monitoring.py
-│   ├── dashboard_systeme.py
+│   ├── dashboard_onglet/
+│   │   ├── dashboard_monitoring.py
+│   │   ├── dashboard_monitoring_performance.py
+│   │   ├── dashboard_monitoring_drift.py
+│   │   ├── dashboard_predictions.py
+│   │   └── dashboard_systeme.py
+│   ├── dashboard_config.py
+│   ├── dashboard_main.py
 │   └── dashboard_request.py
 │
 ├── scripts/
-│   ├── create_tables/
-│   │   ├── create_prediction_tables.py
-│   │   ├── create_monitoring_tables.py
-│   │   └── create_raw_tables.py
-│   │
-│   ├── manualy_run_scripts/
-│   │   ├── run_previeu_ground_truth.py
-│   │   ├── run_monitoring_analysis.py
-│   │   └── run_evidently_analysis.py
-│   │
-│   ├── register_model.py
-│   ├── benchmark_inference.py
-│   └── profile_inference.py
+│   ├── initialisation_tables/
+│   ├── create_monitoring_tables.py
+│   ├── create_prediction_tables.py
+│   ├── pipeline_db.py
+│   └── reset_data.py
+│
+├── manualy_run_scripts/
+│   ├── load_ground_truth_last_2000.py
+│   ├── run_evidently_monitoring.py
+│   ├── run_ground_truth_association.py
+│   ├── run_monitoring_evaluation.py
+│   └── run_preview_ground_truth.py
+│
+├── benchmark_inference.py
+├── convert_model_to_onnx.py
+├── profile_inference.py
+├── register_model.py
 │
 ├── artifacts/
+│   ├── monitoring/
+│   ├── performance/
+│   │   ├── benchmark_baseline.csv
+│   │   ├── benchmark_optimized.csv
+│   │   └── profiling_report.txt
 │   ├── model.joblib
-│   ├── threshold.json
-│   ├── benchmark_baseline.csv
-│   ├── benchmark_optimized.csv
-│   └── profiling_report.txt
+│   ├── model.onnx
+│   └── threshold.json
 │
 ├── data/
 │   ├── application_test.csv
-│   └── autres fichiers Home Credit
+│   └── autres fichiers Home Credit...
 │
 ├── docs/
 │   └── rapport_optimisation_inference.md
@@ -297,6 +341,7 @@ Dans la version actuelle du projet, l’API fonctionne principalement à partir 
   <li>construction des features via le service dédié</li>
   <li>alignement avec <code>MODEL_FEATURES</code></li>
   <li>mise en cache des features prêtes</li>
+  <li>nettoyage des valeurs manquantes avant prédiction</li>
   <li>réutilisation des features pour les prédictions unitaires et batch</li>
 </ol>
 
@@ -328,7 +373,7 @@ Dans la version actuelle du projet, l’API fonctionne principalement à partir 
 
 <h3 style="color: #48C9B0;">Créer les tables de prédiction</h3>
 
-<pre><code>uv run python -m scripts.create_tables.create_prediction_tables</code></pre>
+<pre><code>uv run python -m scripts.initialisation_tables.create_prediction_tables</code></pre>
 
 <p>Tables concernées :</p>
 
@@ -338,9 +383,18 @@ Dans la version actuelle du projet, l’API fonctionne principalement à partir 
   <li><code>ground_truth_labels</code></li>
 </ul>
 
+<div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000000; padding: 14px 18px; margin: 18px 0;">
+  <strong>Note</strong><br><br>
+  La table <code>prediction_logs</code> contient deux métriques distinctes :
+  <ul>
+    <li><code>latency_ms</code> : latence globale API</li>
+    <li><code>inference_latency_ms</code> : temps d’inférence pur du modèle</li>
+  </ul>
+</div>
+
 <h3 style="color: #48C9B0;">Créer les tables de monitoring</h3>
 
-<pre><code>uv run python -m scripts.create_tables.create_monitoring_tables</code></pre>
+<pre><code>uv run python -m scripts.initialisation_tables.create_monitoring_tables</code></pre>
 
 <p>Tables concernées :</p>
 
@@ -352,14 +406,21 @@ Dans la version actuelle du projet, l’API fonctionne principalement à partir 
   <li><code>alerts</code></li>
 </ul>
 
-<h3 style="color: #48C9B0;">Créer les tables RAW</h3>
+<h3 style="color: #48C9B0;">Initialiser la base complète</h3>
 
-<pre><code>uv run python -m scripts.create_tables.create_raw_tables</code></pre>
+<pre><code>uv run python -m scripts.initialisation_tables.pipeline_db</code></pre>
 
-<div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000000; padding: 14px 18px; margin: 18px 0;">
-  <strong>Note</strong><br><br>
-  Les tables RAW existent pour une architecture plus complète basée sur PostgreSQL. Dans la version priorisée actuellement, le projet fonctionne principalement à partir du CSV et du cache applicatif.
-</div>
+<p>
+Ce script permet d’enchaîner la création complète de la base (tables + initialisation éventuelle).
+</p>
+
+<h3 style="color: #48C9B0;">Réinitialiser les données</h3>
+
+<pre><code>uv run python -m scripts.initialisation_tables.reset_data</code></pre>
+
+<p>
+Permet de nettoyer ou réinitialiser les données de test pour repartir sur un environnement propre.
+</p>
 
 <hr>
 
@@ -372,34 +433,50 @@ Dans la version actuelle du projet, l’API fonctionne principalement à partir 
 
 <h3 style="color: #48C9B0;">Enregistrer le modèle actif</h3>
 
-<pre><code>docker exec -e PYTHONPATH=/app -e MODEL_VERSION=v1 -it fastapi_credit_api uv run python -m scripts.register_model</code></pre>
+<pre><code>uv run python -m scripts.register_model</code></pre>
 
 <p>
-Ce script ajoute le modèle courant dans <code>model_registry</code> et permet à l’API ou au dashboard d’identifier le modèle actif.
+Ajoute le modèle courant dans <code>model_registry</code> et le rend actif pour l’API.
 </p>
 
-<h3 style="color: #48C9B0;">Associer les prédictions à une vérité terrain simulée</h3>
+<h3 style="color: #48C9B0;">Associer les prédictions aux vérités terrain</h3>
 
-<pre><code>uv run python -m scripts.manualy_run_scripts.run_previeu_ground_truth</code></pre>
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_preview_ground_truth</code></pre>
 
 <p>
-Ce script rapproche les prédictions existantes des labels disponibles ou simulés. Il permet ensuite de calculer des métriques de performance sur des données de production simulée.
+Associe les prédictions existantes aux labels disponibles ou simulés afin de permettre le calcul des métriques de performance.
 </p>
 
-<h3 style="color: #48C9B0;">Lancer une analyse de monitoring</h3>
+<h3 style="color: #48C9B0;">Charger des vérités terrain récentes</h3>
 
-<pre><code>uv run python -m scripts.manualy_run_scripts.run_monitoring_analysis</code></pre>
+<pre><code>uv run python -m scripts.manualy_run_scripts.load_ground_truth_last_2000</code></pre>
 
 <p>
-Ce script calcule des métriques de performance, crée des alertes ou alimente les tables de monitoring.
+Injecte un jeu de vérité terrain simulé pour alimenter les métriques de monitoring.
 </p>
 
-<h3 style="color: #48C9B0;">Lancer une analyse Evidently</h3>
+<h3 style="color: #48C9B0;">Association avancée des vérités terrain</h3>
 
-<pre><code>uv run python -m scripts.manualy_run_scripts.run_evidently_analysis</code></pre>
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_ground_truth_assiociation</code></pre>
 
 <p>
-Ce script produit ou simule une analyse de dérive des données avec Evidently.
+Script avancé pour reconstruire les correspondances entre prédictions et labels.
+</p>
+
+<h3 style="color: #48C9B0;">Lancer une évaluation monitoring</h3>
+
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_monitoring_evaluation</code></pre>
+
+<p>
+Calcule les métriques de performance (precision, recall, coût métier, etc.).
+</p>
+
+<h3 style="color: #48C9B0;">Lancer une analyse de dérive (Evidently)</h3>
+
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_evidently_monitoring</code></pre>
+
+<p>
+Génère une analyse de dérive des données (feature drift) et alimente la table <code>drift_metrics</code>.
 </p>
 
 <hr>
@@ -414,6 +491,8 @@ PostgreSQL est utilisé comme base centrale du projet.
 
 <ul>
   <li>les logs de prédiction</li>
+  <li>la latence API globale</li>
+  <li>le temps d’inférence pur</li>
   <li>les snapshots de features</li>
   <li>les vérités terrain</li>
   <li>les métriques de dérive</li>
@@ -431,7 +510,18 @@ Cette séparation permet de distinguer les données opérationnelles, les donné
 <h2 id="section-10">10. API de prédiction</h2>
 
 <p>
-L’API FastAPI expose le modèle de scoring crédit.
+L’API FastAPI expose le modèle de scoring crédit. Le backend utilisé pour l’inférence est sélectionné par configuration.
+</p>
+
+<h3 style="color: #48C9B0;">Backends supportés</h3>
+
+<ul>
+  <li><code>MODEL_BACKEND=sklearn</code> : chargement du pipeline via <code>joblib</code></li>
+  <li><code>MODEL_BACKEND=onnx</code> : chargement du modèle via <code>ONNX Runtime</code></li>
+</ul>
+
+<p>
+Le service de prédiction utilise la fonction <code>predict_proba_with_backend</code>, ce qui permet de garder la même API applicative tout en changeant le moteur d’inférence.
 </p>
 
 <h3 style="color: #48C9B0;">Endpoints principaux</h3>
@@ -458,11 +548,27 @@ Chaque prédiction peut être journalisée avec :
   <li>le score prédit</li>
   <li>la classe prédite</li>
   <li>le seuil utilisé</li>
-  <li>la latence API</li>
-  <li>le temps d’inférence pur</li>
+  <li>la latence API globale avec <code>latency_ms</code></li>
+  <li>le temps d’inférence pur avec <code>inference_latency_ms</code></li>
   <li>les informations modèle</li>
+  <li>le backend d’inférence configuré</li>
   <li>les éventuelles erreurs</li>
 </ul>
+
+<h3 style="color: #48C9B0;">Exemple de réponse</h3>
+
+<pre><code>{
+  "request_id": "uuid",
+  "client_id": 100001,
+  "prediction": 1,
+  "score": 0.82,
+  "threshold_used": 0.5,
+  "model_name": "credit_scoring_model",
+  "model_version": "v1",
+  "latency_ms": 12.3,
+  "inference_latency_ms": 3.1,
+  "status": "success"
+}</code></pre>
 
 <hr>
 
@@ -470,49 +576,57 @@ Chaque prédiction peut être journalisée avec :
 
 <div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
-  Suivre le comportement du modèle en production simulée : performance, dérive, latence, temps d’inférence, erreurs et alertes.
+  Suivre en continu le comportement du modèle en production simulée afin de détecter toute dégradation :
+  performance métier, dérive des données, latence, erreurs et anomalies système.
 </div>
 
 <h3 style="color: #48C9B0;">Métriques suivies</h3>
 
+<p>
+Le système de monitoring combine des métriques <strong>techniques</strong>, <strong>statistiques</strong> et <strong>métier</strong> afin d’obtenir une vision complète du modèle en production.
+</p>
+
 <ul>
-  <li>nombre total de prédictions</li>
-  <li>distribution des scores prédits</li>
-  <li>latence moyenne API</li>
-  <li>latence p95</li>
-  <li>latence p99</li>
-  <li>temps d’inférence moyen</li>
-  <li>taux d’erreur API</li>
-  <li>drift par feature</li>
-  <li>ROC AUC</li>
-  <li>PR AUC</li>
-  <li>précision</li>
-  <li>rappel</li>
-  <li>F1-score</li>
-  <li>F-beta score</li>
-  <li>coût métier</li>
+  <li><strong>Volume</strong> : nombre total de prédictions</li>
+  <li><strong>Distribution</strong> : scores prédits, classes, dérive des probabilités</li>
+  <li><strong>Performance API</strong> : latence moyenne, p95, p99</li>
+  <li><strong>Performance modèle</strong> : temps d’inférence moyen et distribution</li>
+  <li><strong>Fiabilité</strong> : taux d’erreur API</li>
+  <li><strong>Drift</strong> : dérive des features (feature drift)</li>
+  <li><strong>Performance ML</strong> :
+    <ul>
+      <li>ROC AUC</li>
+      <li>PR AUC</li>
+      <li>précision</li>
+      <li>rappel</li>
+      <li>F1-score / F-beta</li>
+    </ul>
+  </li>
+  <li><strong>Coût métier</strong> : pondération FN / FP</li>
 </ul>
 
 <h3 style="color: #48C9B0;">Différence entre latence et inférence</h3>
 
 <p>
-La <strong>latence API</strong> mesure le temps total perçu par l’utilisateur.
+La distinction entre latence API et temps d’inférence est essentielle pour identifier les goulots d’étranglement.
 </p>
 
+<p><strong>Latence API (expérience utilisateur)</strong></p>
+
 <pre><code>requête reçue
++ validation
 + préparation des données
 + prédiction du modèle
 + journalisation
 + réponse HTTP</code></pre>
 
-<p>
-Le <strong>temps d’inférence</strong> mesure uniquement le temps passé dans le modèle.
-</p>
+<p><strong>Temps d’inférence (performance modèle)</strong></p>
 
-<pre><code>model.predict_proba(features)</code></pre>
+<pre><code>predict_proba_with_backend(features)</code></pre>
 
 <p>
-Les deux métriques sont utiles : la latence mesure l’expérience réelle utilisateur, tandis que le temps d’inférence permet d’identifier si le modèle lui-même est lent.
+👉 Une latence élevée avec une inférence faible indique un problème applicatif  
+👉 Une inférence élevée indique un problème lié au modèle ou au backend
 </p>
 
 <hr>
@@ -520,38 +634,46 @@ Les deux métriques sont utiles : la latence mesure l’expérience réelle util
 <h2 id="section-12">12. Dashboard Streamlit</h2>
 
 <p>
-Le dashboard Streamlit permet de visualiser et piloter le système.
+Le dashboard Streamlit agit comme un <strong>poste de pilotage du modèle en production</strong>.
+Il permet de visualiser les métriques, analyser les anomalies et déclencher des actions de monitoring.
 </p>
 
 <h3 style="color: #48C9B0;">Pages principales</h3>
 
 <ul>
-  <li>vue système</li>
+  <li>vue système (état global API + modèle)</li>
   <li>prédiction unitaire</li>
   <li>simulation batch</li>
   <li>historique des prédictions</li>
-  <li>détail d’une prédiction</li>
+  <li>détail d’une prédiction (traçabilité complète)</li>
   <li>monitoring global</li>
-  <li>métriques de dérive</li>
-  <li>métriques de performance</li>
-  <li>alertes</li>
+  <li>analyse de dérive (drift)</li>
+  <li>performance du modèle</li>
+  <li>gestion des alertes</li>
   <li>registre des modèles</li>
 </ul>
 
 <h3 style="color: #48C9B0;">Indicateurs affichés</h3>
 
 <ul>
-  <li>total des prédictions</li>
-  <li>latence moyenne</li>
-  <li>latence p95</li>
-  <li>latence p99</li>
-  <li>temps moyen d’inférence</li>
-  <li>taux d’erreur</li>
+  <li>KPI globaux (volume, erreurs, drift détecté)</li>
+  <li>latence API (moyenne, p95, p99)</li>
+  <li>temps d’inférence</li>
   <li>distribution des scores</li>
-  <li>répartition des classes prédites</li>
-  <li>métriques de performance</li>
-  <li>alertes ouvertes</li>
+  <li>répartition des classes</li>
+  <li>évolution temporelle des métriques</li>
+  <li>métriques de performance ML</li>
+  <li>alertes ouvertes et historiques</li>
 </ul>
+
+<p>
+👉 Le dashboard permet de détecter rapidement :
+<ul>
+  <li>une dérive de données</li>
+  <li>une dégradation de performance</li>
+  <li>un problème de latence</li>
+</ul>
+</p>
 
 <hr>
 
@@ -559,19 +681,17 @@ Le dashboard Streamlit permet de visualiser et piloter le système.
 
 <div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
-  Analyser les performances réelles ou simulées du modèle après déploiement, identifier les goulots d’étranglement et tester des optimisations pour améliorer le temps de réponse.
+  Identifier les goulots d’étranglement après déploiement et améliorer les performances réelles du système (latence et inférence).
 </div>
 
 <h3 style="color: #48C9B0;">Métriques utilisées</h3>
 
 <ul>
-  <li>latence moyenne API</li>
-  <li>latence p95</li>
-  <li>latence p99</li>
+  <li>latence moyenne, p95, p99</li>
   <li>temps d’inférence pur</li>
   <li>temps de préparation des features</li>
   <li>taux d’erreur</li>
-  <li>utilisation CPU / mémoire si disponible</li>
+  <li>utilisation CPU / mémoire (si instrumenté)</li>
 </ul>
 
 <h3 style="color: #48C9B0;">Profiling</h3>
@@ -580,27 +700,37 @@ Le dashboard Streamlit permet de visualiser et piloter le système.
 
 <pre><code>uv run python scripts/profile_inference.py</code></pre>
 
-<h3 style="color: #48C9B0;">Benchmark baseline</h3>
+<p>
+Permet d’identifier précisément les fonctions les plus coûteuses.
+</p>
+
+<h3 style="color: #48C9B0;">Benchmark</h3>
+
+<p><strong>Baseline</strong></p>
 
 <pre><code>uv run python scripts/benchmark_inference.py --mode baseline</code></pre>
 
-<h3 style="color: #48C9B0;">Benchmark optimisé</h3>
+<p><strong>Version optimisée</strong></p>
 
 <pre><code>uv run python scripts/benchmark_inference.py --mode optimized</code></pre>
 
-<h3 style="color: #48C9B0;">Optimisations testées</h3>
+<p>
+👉 Comparaison directe des performances avant / après optimisation.
+</p>
+
+<h3 style="color: #48C9B0;">Optimisations mises en place</h3>
 
 <ul>
-  <li>chargement du modèle une seule fois au démarrage de l’API</li>
-  <li>cache des données et des features client en mémoire</li>
-  <li>alignement strict des colonnes avant prédiction</li>
-  <li>réduction des conversions pandas inutiles</li>
-  <li>conversion des données numériques en <code>float32</code></li>
-  <li>journalisation du temps d’inférence pur</li>
-  <li>séparation entre latence API et inférence modèle</li>
+  <li>chargement unique du modèle au démarrage</li>
+  <li>mise en cache du modèle et du seuil</li>
+  <li>cache des features en mémoire</li>
+  <li>réduction des transformations pandas</li>
+  <li>conversion en <code>float32</code></li>
+  <li>séparation latence API / inférence</li>
+  <li>support ONNX Runtime pour accélération CPU</li>
 </ul>
 
-<h3 style="color: #48C9B0;">Rapport d’optimisation</h3>
+<h3 style="color: #48C9B0;">Rapport d’analyse</h3>
 
 <pre><code>docs/rapport_optimisation_inference.md</code></pre>
 
@@ -609,60 +739,85 @@ Le dashboard Streamlit permet de visualiser et piloter le système.
 <h2 id="section-14">14. Tests et qualité du code</h2>
 
 <p>
-Le projet intègre ou prévoit des tests automatisés sur :
+Le projet inclut une stratégie de tests visant à garantir la robustesse du système en production.
 </p>
 
+<h3 style="color: #48C9B0;">Couverture des tests</h3>
+
 <ul>
-  <li>les endpoints FastAPI</li>
-  <li>le chargement du modèle</li>
-  <li>l’alignement des features</li>
-  <li>les services de prédiction</li>
-  <li>les routes de monitoring</li>
-  <li>les appels du dashboard</li>
-  <li>les scripts de création de tables</li>
+  <li>endpoints FastAPI</li>
+  <li>chargement et cache du modèle</li>
+  <li>choix dynamique du backend (sklearn / ONNX)</li>
+  <li>chargement du seuil métier</li>
+  <li>alignement des features</li>
+  <li>services de prédiction</li>
+  <li>mesure du <code>inference_latency_ms</code></li>
+  <li>routes de monitoring</li>
+  <li>scripts d’initialisation</li>
 </ul>
 
-<h3 style="color: #48C9B0;">Lancer les tests</h3>
+<h3 style="color: #48C9B0;">Exécution des tests</h3>
 
 <pre><code>uv run pytest</code></pre>
 
-<h3 style="color: #48C9B0;">Linting avec Ruff</h3>
-
-<pre><code>uv run ruff check .</code></pre>
-
 <div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000000; padding: 14px 18px; margin: 18px 0;">
-  <strong>Attention</strong><br><br>
-  Si la commande Ruff échoue avec <code>Failed to spawn: ruff</code>, cela signifie que Ruff n’est pas installé dans l’environnement. Il faut l’ajouter dans les dépendances du projet.
+  <strong>Note</strong><br><br>
+  Certains tests forcent <code>MODEL_BACKEND=sklearn</code> afin de garantir la stabilité des tests unitaires.
 </div>
+
+<h3 style="color: #48C9B0;">Contrat des fonctions de prédiction</h3>
+
+<pre><code>prediction, score, threshold_used, inference_latency_ms = _predict_raw(features)</code></pre>
+
+<pre><code>scores, inference_latency_ms = _predict_scores(df)</code></pre>
+
+<p>
+Le temps d’inférence est désormais une métrique de premier niveau dans le système.
+</p>
+
+<p>
+Cela permet de mesurer précisément la performance du modèle indépendamment du reste de la chaîne applicative.
+</p>
 
 <hr>
 
 <h2 id="section-15">15. CI/CD et déploiement</h2>
 
 <p>
-Le projet peut être contrôlé par GitHub Actions afin d’automatiser :
+Le projet est conçu pour s’intégrer dans un pipeline CI/CD automatisé via GitHub Actions afin de garantir la qualité et la reproductibilité des déploiements.
 </p>
 
+<h3 style="color: #48C9B0;">Objectifs du pipeline</h3>
+
 <ul>
-  <li>l’installation de l’environnement</li>
-  <li>les tests unitaires</li>
-  <li>le linting</li>
-  <li>la construction Docker</li>
-  <li>le déploiement de la version optimisée</li>
+  <li>assurer la reproductibilité de l’environnement</li>
+  <li>valider le code via des tests automatisés</li>
+  <li>construire une image Docker versionnée</li>
+  <li>préparer un déploiement continu</li>
 </ul>
 
-<h3 style="color: #48C9B0;">Pipeline attendu</h3>
+<h3 style="color: #48C9B0;">Pipeline CI/CD</h3>
 
 <pre><code>push GitHub
       │
       ▼
 GitHub Actions
       │
-      ├── uv sync
-      ├── ruff check
-      ├── pytest
-      ├── build Docker
-      └── deploy</code></pre>
+      ├── installation environnement (uv sync)
+      ├── linting (optionnel mais recommandé)
+      ├── tests unitaires (pytest)
+      ├── build image Docker
+      ├── push image (registry)
+      └── déploiement (optionnel)</code></pre>
+
+<p>
+👉 Ce pipeline permet de sécuriser chaque modification avant mise en production.
+</p>
+
+<div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000000; padding: 14px 18px; margin: 18px 0;">
+  <strong>Amélioration possible</strong><br><br>
+  Ajouter une étape de linting avec <code>ruff</code> ou <code>flake8</code> pour garantir la qualité du code.
+</div>
 
 <hr>
 
@@ -672,30 +827,120 @@ GitHub Actions
 
 <ul>
   <li>Python 3.11</li>
-  <li>uv</li>
-  <li>Docker</li>
-  <li>Docker Compose</li>
+  <li>uv (gestionnaire d’environnement rapide)</li>
+  <li>Docker & Docker Compose</li>
   <li>PostgreSQL</li>
-  <li>un modèle sérialisé au format <code>joblib</code></li>
+  <li>modèle sérialisé (<code>joblib</code> ou <code>ONNX</code>)</li>
 </ul>
 
-<h3 style="color: #48C9B0;">Variables d’environnement</h3>
+<h3 style="color: #48C9B0;">Variables d’environnement principales</h3>
 
-<pre><code>API_KEY=votre_token_api
-DATABASE_URL=postgresql+psycopg://postgres:postgres@db:5432/credit_api
+<p>
+La configuration du système repose sur un fichier <code>.env</code> permettant de piloter dynamiquement le comportement de l’API et du monitoring.
+</p>
 
-MODEL_PATH=artifacts/model.joblib
+<pre><code># API
+API_KEY=xxxxxxxxxxxxxx
+DEBUG=True
+DEBUG_MODEL=False
+
+# Base de données
+DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/credit_api
+
+# Source des données
+DATA_DIR=data
+SOURCE_CSV=application_train.csv
+
+# Modèle
 MODEL_NAME=credit_scoring_model
 MODEL_VERSION=v1
-MODEL_THRESHOLD=0.5
+MODEL_BACKEND=onnx
+MODEL_PATH=artifacts/model.joblib
+ONNX_MODEL_PATH=artifacts/model.onnx
+THRESHOLD_PATH=artifacts/threshold.json
 
-APPLICATION_CSV=data/application_test.csv
+# Dashboard
+API_URL=http://127.0.0.1:8000
+DEFAULT_LIMIT=200
 
-DEBUG=True</code></pre>
+# Monitoring
+REFERENCE_FEATURES_PATH=artifacts/monitoring/reference_features_transformed.parquet
+MONITORING_DIR=artifacts/monitoring
+CURRENT_WINDOW_DAYS=7
+
+# Seuils de drift et alertes
+EVIDENTLY_DRIFT_SHARE=0.50
+ALERT_ON_RECALL_BELOW=0.60
+ALERT_ON_LATENCY_ABOVE_MS=800
+ALERT_ON_ERROR_RATE_ABOVE=0.05
+
+# Coût métier
+BUSINESS_COST_FN=10
+BUSINESS_COST_FP=1
+
+# Simulation
+SIMULATION_MAX_ITEMS=200
+SIMULATION_DEFAULT_ITEMS=200
+
+# Evidently
+EVIDENTLY_REPORT_PATH=artifacts/monitoring/evidently_drift_report.html
+DEFAULT_EVIDENTLY_TIMEOUT=300
+
+# Artefacts (local / Hugging Face)
+ASSETS_SOURCE=auto
+HF_REPO_ID=SteGONZALEZ/pret-a-depenser-artifacts
+HF_REPO_TYPE=dataset
+HF_TOKEN=hf_xxxxx...</code></pre>
+
+<h3 style="color: #48C9B0;">Choix du backend modèle</h3>
+
+<p>
+Le système supporte deux moteurs d’inférence interchangeables :
+</p>
+
+<ul>
+  <li><strong>sklearn/joblib</strong> : simple et fidèle au modèle d’entraînement</li>
+  <li><strong>ONNX Runtime</strong> : optimisé pour l’inférence rapide</li>
+</ul>
+
+<p><strong>Configuration sklearn</strong></p>
+
+<pre><code>MODEL_BACKEND=sklearn
+MODEL_PATH=artifacts/model.joblib</code></pre>
+
+<p><strong>Configuration ONNX</strong></p>
+
+<pre><code>MODEL_BACKEND=onnx
+ONNX_MODEL_PATH=artifacts/model.onnx</code></pre>
+
+<p>
+👉 Le changement de backend ne nécessite aucune modification du code applicatif.
+</p>
+
+<h3 style="color: #48C9B0;">Gestion des artefacts</h3>
+
+<p>
+Les modèles et artefacts peuvent être chargés dynamiquement :
+</p>
+
+<ul>
+  <li><code>ASSETS_SOURCE=local</code> : utilisation des fichiers locaux</li>
+  <li><code>ASSETS_SOURCE=huggingface</code> : téléchargement distant</li>
+  <li><code>ASSETS_SOURCE=auto</code> : fallback intelligent</li>
+</ul>
+
+<p>
+👉 Permet de simuler une architecture proche d’un environnement cloud réel.
+</p>
 
 <hr>
 
 <h2 id="section-17">17. Lancer le projet</h2>
+
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000000; padding: 14px 18px; margin: 18px 0;">
+  <strong>Objectif</strong><br><br>
+  Démarrer rapidement l’ensemble du système : base de données, API, modèle et dashboard, puis générer des données pour activer le monitoring.
+</div>
 
 <h3 style="color: #48C9B0;">1. Installer les dépendances</h3>
 
@@ -705,39 +950,51 @@ DEBUG=True</code></pre>
 
 <pre><code>docker compose up --build</code></pre>
 
-<h3 style="color: #48C9B0;">3. Créer les tables de prédiction</h3>
+<h3 style="color: #48C9B0;">3. Initialiser la base de données</h3>
 
-<pre><code>uv run python -m scripts.create_tables.create_prediction_tables</code></pre>
+<pre><code>uv run python -m scripts.initialisation_tables.pipeline_db</code></pre>
 
-<h3 style="color: #48C9B0;">4. Créer les tables de monitoring</h3>
+<p>
+👉 Crée automatiquement les tables nécessaires (prédiction + monitoring).
+</p>
 
-<pre><code>uv run python -m scripts.create_tables.create_monitoring_tables</code></pre>
+<h3 style="color: #48C9B0;">4. Enregistrer le modèle actif</h3>
 
-<h3 style="color: #48C9B0;">5. Enregistrer le modèle actif</h3>
+<pre><code>uv run python -m scripts.register_model</code></pre>
 
-<pre><code>docker exec -e PYTHONPATH=/app -e MODEL_VERSION=v1 -it fastapi_credit_api uv run python -m scripts.register_model</code></pre>
-
-<h3 style="color: #48C9B0;">6. Lancer l’API en local</h3>
+<h3 style="color: #48C9B0;">5. Lancer l’API</h3>
 
 <pre><code>uv run uvicorn app.main:app --reload</code></pre>
 
-<h3 style="color: #48C9B0;">7. Lancer le dashboard</h3>
+<h3 style="color: #48C9B0;">6. Lancer le dashboard</h3>
 
-<pre><code>uv run streamlit run dashboard/dashboard.py</code></pre>
+<pre><code>uv run streamlit run dashboard/dashboard_main.py</code></pre>
 
-<h3 style="color: #48C9B0;">8. Simuler des prédictions</h3>
+<h3 style="color: #48C9B0;">7. Générer des prédictions (simulation)</h3>
+
+<p>
+Depuis Swagger ou via requête HTTP :
+</p>
 
 <pre><code>POST /predict/simulate/real-sample?limit=200</code></pre>
 
-<h3 style="color: #48C9B0;">9. Générer ou associer les vérités terrain</h3>
+<p>
+👉 Cette étape est essentielle pour alimenter le monitoring.
+</p>
 
-<pre><code>uv run python -m scripts.manualy_run_scripts.run_previeu_ground_truth</code></pre>
+<h3 style="color: #48C9B0;">8. Générer les vérités terrain</h3>
 
-<h3 style="color: #48C9B0;">10. Lancer le monitoring</h3>
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_preview_ground_truth</code></pre>
 
-<pre><code>uv run python -m scripts.manualy_run_scripts.run_monitoring_analysis</code></pre>
+<h3 style="color: #48C9B0;">9. Calculer les métriques de monitoring</h3>
 
-<h3 style="color: #48C9B0;">11. Lancer les benchmarks d’optimisation</h3>
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_monitoring_evaluation</code></pre>
+
+<h3 style="color: #48C9B0;">10. Lancer l’analyse de dérive (drift)</h3>
+
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_evidently_monitoring</code></pre>
+
+<h3 style="color: #48C9B0;">11. Benchmark des performances</h3>
 
 <pre><code>uv run python scripts/benchmark_inference.py --mode baseline
 uv run python scripts/benchmark_inference.py --mode optimized</code></pre>
@@ -747,30 +1004,37 @@ uv run python scripts/benchmark_inference.py --mode optimized</code></pre>
 <h2 id="section-18">18. Limites du prototype</h2>
 
 <ul>
-  <li>le monitoring dépend du volume de prédictions journalisées</li>
+  <li>le monitoring dépend du volume de prédictions disponibles</li>
   <li>les métriques de performance nécessitent une vérité terrain fiable</li>
-  <li>les données de production sont simulées dans le cadre du projet</li>
-  <li>le monitoring CPU/GPU reste basique si aucun outil système dédié n’est branché</li>
-  <li>les optimisations testées restent adaptées à un prototype local</li>
-  <li>le drift dépend fortement du choix de la fenêtre de référence</li>
-  <li>le dashboard dépend de la disponibilité de l’API FastAPI</li>
+  <li>les données de production sont simulées</li>
+  <li>le monitoring système (CPU / RAM) reste limité sans outil externe</li>
+  <li>les optimisations sont testées dans un environnement local</li>
+  <li>le drift dépend du choix de la fenêtre de référence</li>
+  <li>le dashboard dépend de la disponibilité de l’API</li>
+  <li>la compatibilité ONNX dépend du modèle exporté</li>
 </ul>
+
+<div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000000; padding: 14px 18px; margin: 18px 0;">
+  <strong>Lecture critique</strong><br><br>
+  Ces limites reflètent un environnement de prototype contrôlé. Elles seraient levées dans une architecture production (cloud, monitoring système, orchestration).
+</div>
 
 <hr>
 
 <h2 id="section-19">19. Pistes d’amélioration</h2>
 
 <ul>
-  <li>ajouter un vrai ordonnanceur de jobs de monitoring</li>
-  <li>automatiser le calcul périodique du drift</li>
-  <li>ajouter Prometheus et Grafana pour les métriques système</li>
-  <li>brancher un monitoring CPU / mémoire plus complet</li>
-  <li>tester ONNX Runtime pour optimiser l’inférence</li>
-  <li>ajouter un système de rollback modèle</li>
-  <li>améliorer la gestion des seuils de décision</li>
-  <li>déployer sur une infrastructure cloud</li>
+  <li>ajouter un orchestrateur (Airflow / Prefect) pour automatiser le monitoring</li>
+  <li>planifier le calcul du drift (batch journalier)</li>
+  <li>intégrer Prometheus + Grafana pour le monitoring système</li>
+  <li>monitorer CPU / mémoire / throughput</li>
+  <li>comparer formellement sklearn vs ONNX</li>
+  <li>tester la quantification ONNX</li>
+  <li>mettre en place un rollback automatique de modèle</li>
+  <li>améliorer la gestion dynamique des seuils</li>
+  <li>déployer sur une infrastructure cloud (AWS / GCP)</li>
   <li>ajouter des tests de non-régression sur les prédictions</li>
-  <li>mettre en place des alertes automatiques</li>
+  <li>implémenter un système d’alertes automatisées</li>
 </ul>
 
 <hr>
@@ -778,11 +1042,11 @@ uv run python scripts/benchmark_inference.py --mode optimized</code></pre>
 <h2 id="section-20">20. Auteur</h2>
 
 <p>
-Projet réalisé par <strong>Stéphane GONZALEZ</strong> dans le cadre d’un apprentissage autour du déploiement de modèles de machine learning, du monitoring MLOps, de l’optimisation post-déploiement et des architectures applicatives de scoring crédit.
+Projet réalisé par <strong>Stéphane GONZALEZ</strong> dans le cadre d’un apprentissage avancé du déploiement de modèles de machine learning, du monitoring MLOps et de l’optimisation post-déploiement.
 </p>
 
 <hr>
 
 <h2 id="section-21">21. Licence</h2>
 
-<p>Usage éducatif.</p>
+<p>Projet à usage éducatif.</p>

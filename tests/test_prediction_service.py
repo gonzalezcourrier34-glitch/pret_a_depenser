@@ -13,10 +13,6 @@ import pytest
 from app.services import prediction_service as ps
 
 
-# =============================================================================
-# Faux objets
-# =============================================================================
-
 class DummyModel:
     def __init__(self, proba_matrix):
         self.proba_matrix = proba_matrix
@@ -53,10 +49,6 @@ class FakeGroundTruth:
     notes: str | None
 
 
-# =============================================================================
-# Fixtures
-# =============================================================================
-
 @pytest.fixture
 def fake_db():
     return object()
@@ -82,16 +74,9 @@ def sample_df() -> pd.DataFrame:
 
 
 def build_perf_counter(step: float = 0.1):
-    """
-    Retourne une fonction perf_counter robuste pour les tests.
-    """
     values = count(start=1.0, step=step)
     return lambda: next(values)
 
-
-# =============================================================================
-# Validation helpers
-# =============================================================================
 
 def test_ensure_dataframe_from_dict_success(sample_features: dict[str, Any]) -> None:
     df = ps._ensure_dataframe_from_dict(sample_features)
@@ -211,10 +196,6 @@ def test_validate_ground_truth_inputs_observed_at_invalid() -> None:
         )
 
 
-# =============================================================================
-# Helpers techniques
-# =============================================================================
-
 def test_safe_request_id_returns_string() -> None:
     result = ps._safe_request_id()
     assert isinstance(result, str)
@@ -222,34 +203,42 @@ def test_safe_request_id_returns_string() -> None:
 
 
 def test_safe_request_id_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ps.uuid, "uuid4", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        ps.uuid,
+        "uuid4",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
     result = ps._safe_request_id()
     assert isinstance(result, str)
     assert result.startswith("fallback-")
 
 
-# =============================================================================
-# Helpers modèle
-# =============================================================================
-
 def test_predict_scores_success(
     monkeypatch: pytest.MonkeyPatch,
     sample_df: pd.DataFrame,
 ) -> None:
-    monkeypatch.setattr(ps, "get_model", lambda: DummyModel([[0.2, 0.8], [0.7, 0.3]]))
+    values = iter([0.8, 0.3])
+    monkeypatch.setattr(ps, "predict_proba_with_backend", lambda df: next(values))
 
-    scores = ps._predict_scores(sample_df)
+    scores, inference_latency_ms = ps._predict_scores(sample_df)
 
     assert list(scores) == [0.8, 0.3]
+    assert isinstance(inference_latency_ms, float)
 
 
 def test_predict_scores_raises_if_no_predict_proba(
     monkeypatch: pytest.MonkeyPatch,
     sample_df: pd.DataFrame,
 ) -> None:
-    monkeypatch.setattr(ps, "get_model", lambda: DummyModelNoProba())
+    monkeypatch.setattr(
+        ps,
+        "predict_proba_with_backend",
+        lambda df: (_ for _ in ()).throw(
+            AttributeError("Le modèle sklearn ne possède pas predict_proba.")
+        ),
+    )
 
-    with pytest.raises(AttributeError, match="ne possède pas de méthode `predict_proba`"):
+    with pytest.raises(AttributeError, match="predict_proba"):
         ps._predict_scores(sample_df)
 
 
@@ -257,9 +246,15 @@ def test_predict_scores_raises_if_invalid_predict_proba_output(
     monkeypatch: pytest.MonkeyPatch,
     sample_df: pd.DataFrame,
 ) -> None:
-    monkeypatch.setattr(ps, "get_model", lambda: DummyModel([[0.8], [0.3]]))
+    monkeypatch.setattr(
+        ps,
+        "predict_proba_with_backend",
+        lambda df: (_ for _ in ()).throw(
+            ValueError("Format de sortie predict_proba invalide.")
+        ),
+    )
 
-    with pytest.raises(ValueError, match="ne contient pas deux colonnes"):
+    with pytest.raises(ValueError, match="predict_proba invalide"):
         ps._predict_scores(sample_df)
 
 
@@ -268,27 +263,26 @@ def test_predict_raw_success(
     sample_features: dict[str, Any],
 ) -> None:
     monkeypatch.setattr(ps, "get_threshold", lambda: 0.5)
-    monkeypatch.setattr(ps, "_predict_scores", lambda df: pd.Series([0.9], index=df.index))
+    monkeypatch.setattr(
+        ps,
+        "_predict_scores",
+        lambda df: (pd.Series([0.9], index=df.index), 2.4),
+    )
 
-    prediction, score, threshold = ps._predict_raw(sample_features)
+    prediction, score, threshold, inference_latency_ms = ps._predict_raw(sample_features)
 
     assert prediction == 1
     assert score == 0.9
     assert threshold == 0.5
+    assert inference_latency_ms == 2.4
 
-
-# =============================================================================
-# Cache / extraction helpers
-# =============================================================================
 
 def test_extract_application_df_from_dataframe(
     sample_df: pd.DataFrame,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(ps, "get_data_cache", lambda: sample_df)
-
     result = ps._extract_application_df()
-
     assert result.equals(sample_df)
 
 
@@ -299,9 +293,7 @@ def test_extract_application_df_from_dict(
     key: str,
 ) -> None:
     monkeypatch.setattr(ps, "get_data_cache", lambda: {key: sample_df})
-
     result = ps._extract_application_df()
-
     assert result.equals(sample_df)
 
 
@@ -321,9 +313,7 @@ def test_extract_application_df_raises_if_invalid_cache_type(monkeypatch: pytest
 
 def test_extract_existing_client_ids_success() -> None:
     df = pd.DataFrame({"SK_ID_CURR": [1, 2, 2, None, 3]})
-
     result = ps.extract_existing_client_ids(df)
-
     assert result == [1, 2, 3]
 
 
@@ -341,7 +331,6 @@ def test_extract_existing_client_ids_no_usable_ids() -> None:
 
 def test_get_random_existing_client_ids_success() -> None:
     df = pd.DataFrame({"SK_ID_CURR": [1, 2, 3, 4, 5]})
-
     result = ps.get_random_existing_client_ids(df, limit=3, random_seed=42)
 
     assert len(result) == 3
@@ -392,7 +381,6 @@ def test_generate_random_value_from_series_numeric_float(monkeypatch: pytest.Mon
 
 def test_generate_random_value_from_series_constant_numeric() -> None:
     series = pd.Series([5, 5, 5])
-
     result = ps._generate_random_value_from_series(series)
 
     assert result == 5
@@ -409,7 +397,6 @@ def test_generate_random_value_from_series_categorical(monkeypatch: pytest.Monke
 
 def test_generate_random_value_from_series_empty() -> None:
     series = pd.Series([None, None])
-
     result = ps._generate_random_value_from_series(series)
 
     assert result is None
@@ -454,7 +441,6 @@ def test_sanitize_feature_row() -> None:
 
 def test_get_single_row_feature_dict_success() -> None:
     df = pd.DataFrame([{"A": 1, "B": float("nan")}])
-
     result = ps._get_single_row_feature_dict(df, context="Test")
 
     assert result == {"A": 1, "B": None}
@@ -479,12 +465,9 @@ def test_get_features_for_client(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result == {"A": 1, "B": None}
 
 
-# =============================================================================
-# Logging helpers
-# =============================================================================
-
 def test_log_success_prediction() -> None:
     logger = FakePredictionLoggingService()
+
     ps._log_success_prediction(
         logger,
         request_id="req_1",
@@ -494,16 +477,19 @@ def test_log_success_prediction() -> None:
         score=0.8,
         threshold_used=0.5,
         latency_ms=12.3,
+        inference_latency_ms=8.1,
         source_table="api_request",
     )
 
     assert len(logger.logged_success) == 1
     assert logger.logged_success[0]["request_id"] == "req_1"
     assert logger.logged_success[0]["prediction"] == 1
+    assert logger.logged_success[0]["inference_latency_ms"] == 8.1
 
 
 def test_log_error_prediction() -> None:
     logger = FakePredictionLoggingService()
+
     ps._log_error_prediction(
         logger,
         request_id="req_2",
@@ -511,10 +497,12 @@ def test_log_error_prediction() -> None:
         input_data={"A": 1},
         error_message="boom",
         latency_ms=5.0,
+        inference_latency_ms=0.0,
     )
 
     assert len(logger.logged_errors) == 1
     assert logger.logged_errors[0]["error_message"] == "boom"
+    assert logger.logged_errors[0]["inference_latency_ms"] == 0.0
 
 
 def test_build_success_item() -> None:
@@ -525,9 +513,12 @@ def test_build_success_item() -> None:
         score=0.7,
         threshold_used=0.5,
         latency_ms=1.2,
+        inference_latency_ms=0.9,
     )
+
     assert result["status"] == "success"
     assert result["prediction"] == 1
+    assert result["inference_latency_ms"] == 0.9
 
 
 def test_build_error_item() -> None:
@@ -536,24 +527,23 @@ def test_build_error_item() -> None:
         client_id=1,
         error_message="boom",
         latency_ms=1.2,
+        inference_latency_ms=0.0,
     )
+
     assert result["status"] == "error"
     assert result["prediction"] is None
+    assert result["inference_latency_ms"] == 0.0
 
-
-# =============================================================================
-# Single prediction public API
-# =============================================================================
 
 def test_make_prediction_without_db(
     monkeypatch: pytest.MonkeyPatch,
     sample_features: dict[str, Any],
 ) -> None:
-    monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.88, 0.5))
+    monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.88, 0.5, 7.5))
 
     result = ps.make_prediction(sample_features, db=None)
 
-    assert result == (1, 0.88, 0.5)
+    assert result == (1, 0.88, 0.5, 7.5)
 
 
 def test_make_prediction_with_db_success(
@@ -564,7 +554,7 @@ def test_make_prediction_with_db_success(
     fake_logger = FakePredictionLoggingService()
 
     monkeypatch.setattr(ps, "PredictionLoggingService", lambda db: fake_logger)
-    monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.91, 0.5))
+    monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.91, 0.5, 6.0))
     monkeypatch.setattr(ps, "_safe_request_id", lambda: "req_uuid")
     monkeypatch.setattr(ps.time, "perf_counter", build_perf_counter())
 
@@ -573,6 +563,7 @@ def test_make_prediction_with_db_success(
     assert result["request_id"] == "req_uuid"
     assert result["client_id"] == 100001
     assert result["prediction"] == 1
+    assert result["inference_latency_ms"] == 6.0
     assert result["status"] == "success"
     assert len(fake_logger.logged_success) == 1
 
@@ -616,11 +607,11 @@ def test_make_prediction_from_client_id(monkeypatch: pytest.MonkeyPatch, fake_db
 
 
 def test_make_prediction_from_dataframe(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ps, "_predict_raw", lambda features: (0, 0.2, 0.5))
+    monkeypatch.setattr(ps, "_predict_raw", lambda features: (0, 0.2, 0.5, 6.2))
 
     result = ps.make_prediction_from_dataframe(pd.DataFrame([{"A": 1}]))
 
-    assert result == (0, 0.2, 0.5)
+    assert result == (0, 0.2, 0.5, 6.2)
 
 
 def test_make_prediction_from_dataframe_raises_if_not_one_row() -> None:
@@ -629,7 +620,11 @@ def test_make_prediction_from_dataframe_raises_if_not_one_row() -> None:
 
 
 def test_predict_one_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ps, "make_prediction_from_dataframe", lambda df: (1, 0.8, 0.5))
+    monkeypatch.setattr(
+        ps,
+        "make_prediction_from_dataframe",
+        lambda df: (1, 0.8, 0.5, 4.4),
+    )
 
     result = ps.predict_one_row(pd.DataFrame([{"A": 1}]))
 
@@ -637,15 +632,12 @@ def test_predict_one_row(monkeypatch: pytest.MonkeyPatch) -> None:
         "prediction": 1,
         "score": 0.8,
         "threshold_used": 0.5,
+        "inference_latency_ms": 4.4,
     }
 
 
-# =============================================================================
-# Batch public API
-# =============================================================================
-
 def test_make_batch_prediction(monkeypatch: pytest.MonkeyPatch, sample_df: pd.DataFrame) -> None:
-    monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.75, 0.5))
+    monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.75, 0.5, 3.3))
 
     result = ps.make_batch_prediction(sample_df)
 
@@ -653,6 +645,7 @@ def test_make_batch_prediction(monkeypatch: pytest.MonkeyPatch, sample_df: pd.Da
     assert "score" in result.columns
     assert "prediction" in result.columns
     assert "threshold_used" in result.columns
+    assert "inference_latency_ms" in result.columns
 
 
 def test_run_batch_prediction_success_and_error(
@@ -664,7 +657,7 @@ def test_run_batch_prediction_success_and_error(
     def fake_predict_raw(features):
         if features.get("A") == "bad":
             raise RuntimeError("bad row")
-        return (1, 0.9, 0.5)
+        return (1, 0.9, 0.5, 3.3)
 
     monkeypatch.setattr(ps, "PredictionLoggingService", lambda db: fake_logger)
     monkeypatch.setattr(ps, "_predict_raw", fake_predict_raw)
@@ -720,7 +713,7 @@ def test_predict_batch_from_client_ids_success_and_error(
         return {"A": client_id}
 
     monkeypatch.setattr(ps, "_get_features_for_client", fake_get_features)
-    monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.8, 0.5))
+    monkeypatch.setattr(ps, "_predict_raw", lambda features: (1, 0.8, 0.5, 2.2))
     monkeypatch.setattr(ps, "PredictionLoggingService", lambda db: fake_logger)
     monkeypatch.setattr(ps, "_safe_request_id", lambda: "req_id")
     monkeypatch.setattr(ps.time, "perf_counter", build_perf_counter())
@@ -733,10 +726,6 @@ def test_predict_batch_from_client_ids_success_and_error(
     assert result["items"][0]["status"] == "success"
     assert result["items"][1]["status"] == "error"
 
-
-# =============================================================================
-# Simulations
-# =============================================================================
 
 def test_run_real_client_simulation(monkeypatch: pytest.MonkeyPatch, fake_db) -> None:
     monkeypatch.setattr(
@@ -800,7 +789,7 @@ def test_run_random_feature_simulation_success_and_error(
     def fake_predict_raw(features):
         if features["A"] == "bad":
             raise RuntimeError("bad generated row")
-        return (1, 0.77, 0.5)
+        return (1, 0.77, 0.5, 5.5)
 
     monkeypatch.setattr(ps, "_build_random_feature_rows_from_application", lambda limit: generated_rows)
     monkeypatch.setattr(
@@ -839,10 +828,6 @@ def test_run_random_feature_simulation_raises_if_no_generated_rows(
             source_table="random_generated",
         )
 
-
-# =============================================================================
-# Ground truth
-# =============================================================================
 
 def test_create_ground_truth_label(monkeypatch: pytest.MonkeyPatch, fake_db) -> None:
     observed_at = datetime.utcnow()
@@ -911,10 +896,6 @@ def test_create_ground_truth_label_with_observed_at_none(
     assert result["true_label"] == 0
     assert isinstance(result["observed_at"], datetime)
 
-
-# =============================================================================
-# Summary helper
-# =============================================================================
 
 def test_summarize_batch_results() -> None:
     results = [

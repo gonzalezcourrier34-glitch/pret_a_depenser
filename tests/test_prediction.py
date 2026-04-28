@@ -226,6 +226,7 @@ def test_create_prediction_log(db: FakeSession) -> None:
         score=0.87,
         threshold_used=0.5,
         latency_ms=12.3,
+        inference_latency_ms=8.7,
         input_data={"A": 1},
         output_data={"prediction": 1},
         prediction_timestamp=ts,
@@ -241,6 +242,7 @@ def test_create_prediction_log(db: FakeSession) -> None:
     assert entity.score == 0.87
     assert entity.threshold_used == 0.5
     assert entity.latency_ms == 12.3
+    assert entity.inference_latency_ms == 8.7
     assert entity.input_data == {"A": 1}
     assert entity.output_data == {"prediction": 1}
     assert entity.prediction_timestamp == ts

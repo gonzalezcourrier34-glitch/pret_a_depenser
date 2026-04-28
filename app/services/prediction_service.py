@@ -579,8 +579,8 @@ def _log_success_prediction(
     prediction: int,
     score: float,
     threshold_used: float,
-    latency_ms: float | None,
-    inference_latency_ms: float | None,
+    latency_ms: float | None = None,
+    inference_latency_ms: float | None = None,
     source_table: str,
 ) -> None:
     """
@@ -623,8 +623,8 @@ def _log_error_prediction(
     client_id: int | None,
     input_data: dict[str, Any],
     error_message: str,
-    latency_ms: float | None,
-    inference_latency_ms: float | None,
+    latency_ms: float | None = None,
+    inference_latency_ms: float | None = None,
     status_code: int = 500,
 ) -> None:
     """
@@ -650,8 +650,8 @@ def _build_success_item(
     prediction: int,
     score: float,
     threshold_used: float,
-    latency_ms: float | None,
-    inference_latency_ms: float | None,
+    latency_ms: float | None = None,
+    inference_latency_ms: float | None = None,
 ) -> dict[str, Any]:
     """
     Construit un item de succès standardisé pour les réponses batch.
@@ -675,8 +675,8 @@ def _build_error_item(
     request_id: str,
     client_id: int | None,
     error_message: str,
-    latency_ms: float | None,
-    inference_latency_ms: float | None,
+    latency_ms: float | None = None,
+    inference_latency_ms: float | None = None,
 ) -> dict[str, Any]:
     """
     Construit un item d'erreur standardisé pour les réponses batch.
@@ -955,7 +955,8 @@ def make_batch_prediction(df: pd.DataFrame) -> pd.DataFrame:
         enriched_row["score"] = score
         enriched_row["prediction"] = prediction
         enriched_row["threshold_used"] = threshold
-
+        enriched_row["inference_latency_ms"] = inference_latency_ms
+        
         rows.append(enriched_row)
 
     result_df = pd.DataFrame(rows)

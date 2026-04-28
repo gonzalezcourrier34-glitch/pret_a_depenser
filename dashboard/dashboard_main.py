@@ -38,8 +38,8 @@ from dashboard_config import (
     MODEL_NAME,
     MODEL_VERSION,
 )
-from dashboard_monitoring import render_monitoring_page
-from dashboard_predictions import render_predictions_page
+from dashboard.dashboard_onlget.dashboard_monitoring import render_monitoring_page
+from dashboard.dashboard_onlget.dashboard_predictions import render_predictions_page
 from dashboard_request import (
     build_preview_map,
     build_tables_status_dataframe,
@@ -67,7 +67,7 @@ from dashboard_request import (
     run_evidently_analysis_from_feature_store,
     run_monitoring_evaluation_analysis,
 )
-from dashboard_systeme import render_systeme_page
+from dashboard.dashboard_onlget.dashboard_systeme import render_systeme_page
 
 
 # =============================================================================
