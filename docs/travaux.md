@@ -2,7 +2,7 @@
 
 <div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
-  Je cherche à expliquer les choix d’architecture et de conception que j’ai mis en place pour sécuriser le modèle de scoring crédit, assurer la traçabilité des prédictions et surveiller son comportement en production simulée.
+  Je présente les choix d’architecture et de conception mis en place pour sécuriser le modèle de scoring crédit, garantir la traçabilité complète des prédictions et assurer un monitoring continu de son comportement en production simulée.
 </div>
 
 ---
@@ -10,61 +10,61 @@
 <h3 style="color: #48C9B0;">1. Sécurisation du système</h3>
 
 <p>
-J’ai structuré mon application en plusieurs couches bien séparées afin de limiter les risques et clarifier les responsabilités :
+L’application est organisée selon une architecture en couches clairement séparées afin de limiter les risques, isoler les responsabilités et faciliter la maintenabilité :
 </p>
 
 <ul>
-  <li>une API FastAPI qui sert de point d’entrée unique</li>
+  <li>une API <strong>FastAPI</strong> comme point d’entrée unique</li>
   <li>des services métier pour la logique (prédiction, monitoring, dérive)</li>
-  <li>une base PostgreSQL pour la persistance</li>
-  <li>un dashboard Streamlit pour la visualisation</li>
+  <li>une base <strong>PostgreSQL</strong> pour la persistance</li>
+  <li>un dashboard <strong>Streamlit</strong> pour la visualisation</li>
 </ul>
 
 <p>
-Le dashboard ne communique jamais directement avec la base de données. Toutes les interactions passent par l’API, ce qui me permet de centraliser les contrôles d’accès et de réduire les risques d’exposition.
+Le dashboard ne communique jamais directement avec la base de données. Toutes les interactions transitent par l’API, ce qui permet de centraliser les contrôles d’accès et de réduire la surface d’exposition.
 </p>
 
 <h4 style="color: #48C9B0;">Authentification API</h4>
 
 <ul>
-  <li>j’utilise une clé API transmise dans l’en-tête <code>X-API-Key</code></li>
-  <li>je protège les endpoints sensibles comme la prédiction et le monitoring</li>
+  <li>authentification par clé API via l’en-tête <code>X-API-Key</code></li>
+  <li>protection des endpoints critiques (prédiction, monitoring)</li>
 </ul>
 
 <p>
-Ce mécanisme reste simple mais il est suffisant dans le cadre d’un prototype sécurisé.
+Ce mécanisme, bien que simple, constitue une première couche de sécurité adaptée à un prototype. Il peut être étendu vers des solutions plus robustes (OAuth2, JWT).
 </p>
 
 <h4 style="color: #48C9B0;">Gestion du modèle actif</h4>
 
 <ul>
-  <li>j’utilise une table <code>model_registry</code></li>
-  <li>je stocke le nom, la version et le statut du modèle</li>
+  <li>utilisation d’une table <code>model_registry</code></li>
+  <li>stockage du nom, de la version et du statut du modèle</li>
 </ul>
 
 <p>
-Cela me permet de savoir précisément quel modèle est en production et d’éviter toute ambiguïté. Cette approche facilite aussi les évolutions futures comme un rollback ou la gestion de plusieurs modèles.
+Cette approche garantit la traçabilité du modèle en production et permet d’envisager des stratégies avancées comme le rollback, le versioning ou le déploiement multi-modèles.
 </p>
 
 <h4 style="color: #48C9B0;">Backend d’inférence configurable</h4>
 
 <ul>
-  <li><code>sklearn / joblib</code> pour rester fidèle à l’entraînement</li>
-  <li><code>ONNX Runtime</code> pour améliorer les performances</li>
+  <li><code>sklearn / joblib</code> pour la cohérence avec l’entraînement</li>
+  <li><code>ONNX Runtime</code> pour optimiser les performances</li>
 </ul>
 
 <p>
-Le choix du backend est piloté par configuration via un fichier <code>.env</code>. Je peux donc changer le moteur d’inférence sans modifier le code.
+Le backend est configurable via les variables d’environnement (<code>.env</code>), ce qui permet de modifier le moteur d’inférence sans impact sur le code applicatif.
 </p>
 
 <h4 style="color: #48C9B0;">Seuil métier externalisé</h4>
 
 <ul>
-  <li>le seuil de décision est stocké dans <code>threshold.json</code></li>
+  <li>seuil de décision stocké dans <code>threshold.json</code></li>
 </ul>
 
 <p>
-Cela me permet d’ajuster les décisions métier sans avoir à réentraîner le modèle.
+Ce choix permet d’ajuster dynamiquement les décisions métier sans réentraîner le modèle, facilitant ainsi l’adaptation aux contraintes business.
 </p>
 
 ---
@@ -72,55 +72,57 @@ Cela me permet d’ajuster les décisions métier sans avoir à réentraîner le
 <h3 style="color: #48C9B0;">2. Traçabilité des prédictions</h3>
 
 <p>
-Chaque prédiction est enregistrée dans la table <code>prediction_logs</code>.
-</p>
-
-<p>
-Pour chaque requête, je stocke notamment :
+Chaque prédiction est persistée dans la table <code>prediction_logs</code>, garantissant une traçabilité complète.
 </p>
 
 <ul>
-  <li>un identifiant unique <code>request_id</code></li>
-  <li>l’identifiant client</li>
-  <li>le score et la décision finale</li>
-  <li>le seuil utilisé</li>
-  <li>le modèle et sa version</li>
-  <li>la latence totale et le temps d’inférence</li>
-  <li>le statut et les éventuelles erreurs</li>
+  <li>identifiant unique <code>request_id</code></li>
+  <li>identifiant client</li>
+  <li>score et décision finale</li>
+  <li>seuil utilisé</li>
+  <li>modèle et version</li>
+  <li>latence totale et temps d’inférence</li>
+  <li>statut et erreurs éventuelles</li>
 </ul>
 
 <p>
-Le <code>request_id</code> me permet de suivre une prédiction de bout en bout dans le système.
+Le <code>request_id</code> permet de suivre une requête de bout en bout dans le système (API → modèle → base → monitoring).
 </p>
 
 <h4 style="color: #48C9B0;">Snapshot des features</h4>
 
 <p>
-Je stocke également les variables utilisées lors de la prédiction dans une table dédiée.
+Les variables utilisées lors de la prédiction sont stockées dans une table dédiée.
 </p>
 
 <p>
-Cela me permet de reconstruire exactement le contexte d’une décision, ce qui est essentiel pour l’audit et le debug.
+Cela permet de reconstruire intégralement le contexte d’une décision, ce qui est essentiel pour :
 </p>
+
+<ul>
+  <li>l’audit réglementaire</li>
+  <li>le debug</li>
+  <li>l’analyse post-mortem</li>
+</ul>
 
 ---
 
 <h3 style="color: #48C9B0;">3. Monitoring technique</h3>
 
 <p>
-Je mesure deux métriques principales :
+Deux métriques principales sont suivies :
 </p>
 
 <ul>
-  <li>la latence globale de l’API (<code>latency_ms</code>)</li>
-  <li>le temps d’inférence du modèle (<code>inference_latency_ms</code>)</li>
+  <li><code>latency_ms</code> : latence globale de l’API</li>
+  <li><code>inference_latency_ms</code> : temps d’inférence du modèle</li>
 </ul>
 
 <h4 style="color: #48C9B0;">Latence API</h4>
 
 <pre><code>requête reçue
 + validation
-+ préparation des données
++ preprocessing
 + prédiction
 + logging
 + réponse HTTP</code></pre>
@@ -130,45 +132,45 @@ Je mesure deux métriques principales :
 <pre><code>predict_proba_with_backend(features)</code></pre>
 
 <p>
-Cette séparation me permet d’identifier l’origine d’un problème de performance :
+Cette séparation permet d’isoler précisément les goulots d’étranglement :
 </p>
 
 <ul>
-  <li>si la latence est élevée mais l’inférence faible, le problème vient de l’API</li>
-  <li>si l’inférence est élevée, le problème vient du modèle ou du backend</li>
+  <li>latence élevée + inférence faible → problème infrastructure/API</li>
+  <li>inférence élevée → problème modèle/backend</li>
 </ul>
+
+<p>
+👉 Cette approche est essentielle pour diagnostiquer efficacement les problèmes de performance en production.
+</p>
 
 ---
 
 <h3 style="color: #48C9B0;">4. Monitoring de dérive</h3>
 
 <p>
-J’utilise Evidently pour détecter les dérives entre les données de référence et les données en production.
-</p>
-
-<p>
-Les résultats sont stockés dans la table <code>drift_metrics</code> avec :
+La détection de dérive est réalisée avec Evidently en comparant les données de référence et les données de production.
 </p>
 
 <ul>
-  <li>le nom de la feature</li>
-  <li>la métrique calculée</li>
-  <li>la valeur mesurée</li>
-  <li>le seuil de référence</li>
-  <li>un indicateur de dérive</li>
+  <li>nom de la feature</li>
+  <li>métrique calculée</li>
+  <li>valeur mesurée</li>
+  <li>seuil de référence</li>
+  <li>indicateur de dérive</li>
 </ul>
 
 <p>
-Je distingue deux niveaux d’analyse :
+Deux niveaux d’analyse sont réalisés :
 </p>
 
 <ul>
-  <li>global (ensemble du dataset)</li>
-  <li>par variable</li>
+  <li>global (dataset complet)</li>
+  <li>par feature</li>
 </ul>
 
 <p>
-Cela me permet d’identifier précisément les variables responsables d’une dérive.
+Cela permet d’identifier précisément les variables responsables d’un drift et d’anticiper une dégradation du modèle.
 </p>
 
 ---
@@ -176,7 +178,7 @@ Cela me permet d’identifier précisément les variables responsables d’une d
 <h3 style="color: #48C9B0;">5. Monitoring métier</h3>
 
 <p>
-Je mesure les performances du modèle en comparant les prédictions avec les vérités terrain.
+Les performances sont suivies via des métriques adaptées au contexte du crédit :
 </p>
 
 <ul>
@@ -192,7 +194,7 @@ Je mesure les performances du modèle en comparant les prédictions avec les vé
 <pre><code>coût = FN * coût_FN + FP * coût_FP</code></pre>
 
 <p>
-Cette métrique me permet de prendre en compte le fait que certaines erreurs sont plus coûteuses que d’autres dans le contexte du crédit.
+Cette métrique permet d’intégrer les enjeux business, en tenant compte du fait que certaines erreurs (FN) sont beaucoup plus coûteuses que d’autres.
 </p>
 
 ---
@@ -200,18 +202,19 @@ Cette métrique me permet de prendre en compte le fait que certaines erreurs son
 <h3 style="color: #48C9B0;">6. Système d’alertes</h3>
 
 <p>
-Je génère automatiquement des alertes dans les cas suivants :
+Un système d’alerting est mis en place pour détecter automatiquement les anomalies :
 </p>
 
 <ul>
-  <li>baisse du recall</li>
-  <li>latence trop élevée</li>
-  <li>taux d’erreur important</li>
+  <li>baisse des performances (ex : recall)</li>
+  <li>latence excessive</li>
+  <li>augmentation du taux d’erreur</li>
   <li>dérive des données</li>
 </ul>
 
 <p>
-Ces alertes sont stockées dans une table dédiée et consultables via le dashboard.
+Les alertes sont stockées en base et exposées via le dashboard.  
+Elles peuvent être étendues vers des systèmes de notification (email, Slack) en environnement réel.
 </p>
 
 ---
@@ -219,23 +222,19 @@ Ces alertes sont stockées dans une table dédiée et consultables via le dashbo
 <h3 style="color: #48C9B0;">7. Dashboard de monitoring</h3>
 
 <p>
-Le dashboard Streamlit me permet de piloter le système.
-</p>
-
-<p>
-Je peux notamment :
+Le dashboard Streamlit fournit une interface de pilotage du système.
 </p>
 
 <ul>
-  <li>visualiser les métriques globales</li>
-  <li>analyser les performances et la latence</li>
-  <li>observer les dérives</li>
-  <li>consulter les alertes</li>
-  <li>inspecter le modèle actif</li>
+  <li>visualisation des métriques globales</li>
+  <li>analyse des performances et de la latence</li>
+  <li>suivi des dérives</li>
+  <li>consultation des alertes</li>
+  <li>inspection du modèle actif</li>
 </ul>
 
 <p>
-Cela me donne une vision rapide et claire de l’état du système.
+Il permet une lecture rapide et opérationnelle de l’état du système.
 </p>
 
 ---
@@ -243,20 +242,20 @@ Cela me donne une vision rapide et claire de l’état du système.
 <h3 style="color: #48C9B0;">8. Optimisation et performance</h3>
 
 <p>
-Pour améliorer les performances, j’ai mis en place plusieurs optimisations :
+Plusieurs optimisations ont été mises en place :
 </p>
 
 <ul>
-  <li>mise en cache du modèle et du seuil</li>
-  <li>mise en cache des données et des features</li>
-  <li>réduction des transformations pandas</li>
-  <li>conversion des données en <code>float32</code></li>
+  <li>cache du modèle et du seuil</li>
+  <li>cache des données et features</li>
+  <li>réduction des opérations pandas</li>
+  <li>conversion en <code>float32</code></li>
   <li>utilisation de ONNX Runtime</li>
   <li>profiling et benchmarks</li>
 </ul>
 
 <p>
-Ces optimisations me permettent de réduire la latence et d’améliorer la scalabilité du système.
+Ces optimisations permettent de réduire la latence et d’améliorer la scalabilité du système.
 </p>
 
 ---
@@ -264,15 +263,20 @@ Ces optimisations me permettent de réduire la latence et d’améliorer la scal
 <h3 style="color: #48C9B0;">Conclusion</h3>
 
 <p>
-Mon système repose sur trois éléments principaux :
+Le système repose sur trois piliers fondamentaux :
 </p>
 
 <ul>
-  <li>la sécurité, avec un contrôle des accès et une gestion claire du modèle</li>
-  <li>la traçabilité, grâce à une journalisation complète des prédictions</li>
-  <li>le monitoring, avec des indicateurs techniques et métier</li>
+  <li><strong>sécurité</strong> : contrôle des accès et gestion du modèle</li>
+  <li><strong>traçabilité</strong> : journalisation complète des prédictions</li>
+  <li><strong>monitoring</strong> : suivi technique et métier</li>
 </ul>
 
 <p>
-Ce travail me permet de simuler un environnement MLOps proche d’une mise en production réelle.
+Chaque prédiction est traçable de bout en bout et le comportement du modèle est surveillé en continu.
 </p>
+
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+<strong>Conclusion MLOps</strong><br><br>
+Un modèle en production ne se limite pas à prédire : il doit être sécurisé, traçable et monitoré pour garantir sa fiabilité dans le temps.
+</div>
