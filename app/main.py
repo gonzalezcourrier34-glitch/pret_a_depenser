@@ -84,7 +84,7 @@ setup_logging(
         if BENCHMARK_MODE
         else logging.INFO
     ),
-    write_file=True,
+    write_file=not BENCHMARK_MODE,
     quiet_libraries=True,
 )
 
@@ -192,7 +192,8 @@ app = FastAPI(
 # Middleware
 # =============================================================================
 
-app.add_middleware(LoggingMiddleware)
+if not BENCHMARK_MODE:
+    app.add_middleware(LoggingMiddleware)
 
 # =============================================================================
 # Root
