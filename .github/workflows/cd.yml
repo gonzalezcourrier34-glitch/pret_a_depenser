@@ -119,6 +119,11 @@ jobs:
             --exclude "logs" \
             --exclude "submissions" \
             --exclude "docs/images" \
+            --exclude "data" \
+            --exclude "artifacts" \
+            --exclude "preview_ground_truth_associations.csv" \
+            --exclude "*.csv" \
+            --exclude "*.parquet" \
             --exclude "*.png" \
             --exclude "*.jpg" \
             --exclude "*.jpeg" \
