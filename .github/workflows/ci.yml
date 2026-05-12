@@ -32,6 +32,14 @@ jobs:
         run: uv sync --locked --all-extras --dev
 
       - name: Run tests
+        env:
+          ASSETS_SOURCE: huggingface
+          HF_REPO_ID: SteGONZALEZ/pret-a-depenser-artifacts
+          HF_ASSETS_REPO_ID: SteGONZALEZ/pret-a-depenser-artifacts
+          HF_REPO_TYPE: dataset
+          DATABASE_URL: sqlite:///./test_credit_api.db
+          MODEL_BACKEND: onnx
+          API_KEY: test_api_key
         run: uv run pytest -v
 
       - name: Build Docker image
