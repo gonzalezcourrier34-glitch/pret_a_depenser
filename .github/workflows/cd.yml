@@ -198,12 +198,10 @@ jobs:
       # =============================================================================
 
       - name: Clone Hugging Face Space
-
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-
         run: |
-          git clone https://SteGONZALEZ:${HF_TOKEN}@huggingface.co/spaces/SteGONZALEZ/pret_a_depenser hf-space
+          git clone https://user:${HF_TOKEN}@huggingface.co/spaces/SteGONZALEZ/pret_a_depenser hf-space
 
       # =============================================================================
       # Copie des fichiers vers le Space
@@ -292,12 +290,11 @@ jobs:
       # =============================================================================
 
       - name: Push to Hugging Face Space
-
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd hf-space
-
+          git remote set-url origin https://user:${HF_TOKEN}@huggingface.co/spaces/SteGONZALEZ/pret_a_depenser
           git add .
-
           git commit -m "Deploy from GitHub Actions" || echo "No changes to deploy"
-
           git push
