@@ -42,8 +42,11 @@ def test_routes_are_registered() -> None:
 
 def test_logging_middleware_is_registered() -> None:
     middleware_classes = [m.cls for m in main_module.app.user_middleware]
-    assert main_module.LoggingMiddleware in middleware_classes
 
+    if main_module.BENCHMARK_MODE:
+        assert main_module.LoggingMiddleware not in middleware_classes
+    else:
+        assert main_module.LoggingMiddleware in middleware_classes
 
 # =============================================================================
 # Tests lifespan

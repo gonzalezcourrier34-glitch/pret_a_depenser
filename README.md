@@ -40,10 +40,11 @@
   <li><a href="#section-15">15. CI/CD et déploiement</a></li>
   <li><a href="#section-16">16. Configuration</a></li>
   <li><a href="#section-17">17. Lancer le projet</a></li>
-  <li><a href="#section-18">18. Limites du prototype</a></li>
-  <li><a href="#section-19">19. Pistes d’amélioration</a></li>
-  <li><a href="#section-20">20. Auteur</a></li>
-  <li><a href="#section-21">21. Licence</a></li>
+  <li><a href="#section-18">18. Livrables de la mission</a></li>
+  <li><a href="#section-19">19. Limites du prototype</a></li>
+  <li><a href="#section-20">20. Pistes d’amélioration</a></li>
+  <li><a href="#section-21">21. Auteur</a></li>
+  <li><a href="#section-22">22. Licence</a></li>
 </ul>
 
 <hr>
@@ -978,9 +979,6 @@ Depuis Swagger ou via requête HTTP :
 
 <pre><code>POST /predict/simulate/real-sample?limit=200</code></pre>
 
-<p>
-👉 Cette étape est essentielle pour alimenter le monitoring.
-</p>
 
 <h3 style="color: #48C9B0;">8. Générer les vérités terrain</h3>
 
@@ -1001,7 +999,56 @@ uv run python scripts/benchmark_inference.py --mode optimized</code></pre>
 
 <hr>
 
-<h2 id="section-18">18. Limites du prototype</h2>
+<h2 id="section-18">18. Livrables de la mission</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Livrable demandé</th>
+      <th>Emplacement dans le dépôt</th>
+      <th>Statut</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Historique des versions</td>
+      <td><code>model_registry</code>, <code>MLflow</code>, <code>scripts/register_model.py</code></td>
+      <td>Présent</td>
+    </tr>
+    <tr>
+      <td>Scripts API</td>
+      <td><code>app/api/</code>, <code>app/services/</code>, <code>app/main.py</code></td>
+      <td>Présent</td>
+    </tr>
+    <tr>
+      <td>Dockerfile</td>
+      <td><code>Dockerfile</code>, <code>docker-compose.yml</code></td>
+      <td>Présent</td>
+    </tr>
+    <tr>
+      <td>Scripts de tests automatisés</td>
+      <td><code>tests/</code></td>
+      <td>Présent</td>
+    </tr>
+    <tr>
+      <td>Pipeline CI/CD YAML</td>
+      <td><code>.github/workflows/</code></td>
+      <td>Présent</td>
+    </tr>
+    <tr>
+      <td>Analyse du Data Drift au format notebook</td>
+      <td><code>notebooks/</code> ou <code>docs/</code></td>
+      <td>Présent</td>
+    </tr>
+    <tr>
+      <td>Screenshots stockage données production</td>
+      <td><code>docs/images/</code> ou <code>screenshots/</code></td>
+      <td>Présent</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="section-19">19. Limites du prototype</h2>
 
 <ul>
   <li>le monitoring dépend du volume de prédictions disponibles</li>
@@ -1021,7 +1068,7 @@ uv run python scripts/benchmark_inference.py --mode optimized</code></pre>
 
 <hr>
 
-<h2 id="section-19">19. Pistes d’amélioration</h2>
+<h2 id="section-20">20. Pistes d’amélioration</h2>
 
 <ul>
   <li>ajouter un orchestrateur (Airflow / Prefect) pour automatiser le monitoring</li>
@@ -1039,7 +1086,7 @@ uv run python scripts/benchmark_inference.py --mode optimized</code></pre>
 
 <hr>
 
-<h2 id="section-20">20. Auteur</h2>
+<h2 id="section-21">21. Auteur</h2>
 
 <p>
 Projet réalisé par <strong>Stéphane GONZALEZ</strong> dans le cadre d’un apprentissage avancé du déploiement de modèles de machine learning, du monitoring MLOps et de l’optimisation post-déploiement.
@@ -1047,6 +1094,6 @@ Projet réalisé par <strong>Stéphane GONZALEZ</strong> dans le cadre d’un ap
 
 <hr>
 
-<h2 id="section-21">21. Licence</h2>
+<h2 id="section-22">22. Licence</h2>
 
 <p>Projet à usage éducatif.</p>
