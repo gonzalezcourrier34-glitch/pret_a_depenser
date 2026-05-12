@@ -222,6 +222,16 @@ Dashboard Streamlit
 
 <hr>
 
+<h3 style="color:#48C9B0;">Résumé des flux de production</h3>
+
+<ul>
+  <li>Les prédictions sont servies par FastAPI.</li>
+  <li>Chaque prédiction est historisée dans PostgreSQL.</li>
+  <li>Les features utilisées sont sauvegardées pour la traçabilité.</li>
+  <li>Le monitoring s’appuie sur les prédictions, les vérités terrain et les snapshots de features.</li>
+  <li>Le dashboard Streamlit consomme uniquement l’API, sans accès direct à la base.</li>
+</ul>
+
 <h2 id="section-5">5. Structure du projet</h2>
 
 <pre><code>pret_a_depenser/
@@ -458,7 +468,7 @@ Injecte un jeu de vérité terrain simulé pour alimenter les métriques de moni
 
 <h3 style="color: #48C9B0;">Association avancée des vérités terrain</h3>
 
-<pre><code>uv run python -m scripts.manualy_run_scripts.run_ground_truth_assiociation</code></pre>
+<pre><code>uv run python -m scripts.manualy_run_scripts.run_ground_truth_association</code></pre>
 
 <p>
 Script avancé pour reconstruire les correspondances entre prédictions et labels.
@@ -668,7 +678,7 @@ Il permet de visualiser les métriques, analyser les anomalies et déclencher de
 </ul>
 
 <p>
-👉 Le dashboard permet de détecter rapidement :
+Le dashboard permet de détecter rapidement :
 <ul>
   <li>une dérive de données</li>
   <li>une dégradation de performance</li>
