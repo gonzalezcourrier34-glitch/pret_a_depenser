@@ -1,44 +1,303 @@
+# =============================================================================
+# WORKFLOW CD (Continuous Deployment)
+# =============================================================================
+# Ce workflow :
+# 1. Lance les tests
+# 2. Build l'image Docker
+# 3. Push l'image sur GHCR
+# 4. Déploie automatiquement vers Hugging Face Spaces
+# =============================================================================
+
 name: CD
+
+# =============================================================================
+# Déclencheurs
+# =============================================================================
 
 on:
   push:
-    branches: ["main", "master"]
+    branches:
+      - main
+      - master
+
+  # Permet de lancer le workflow manuellement depuis GitHub
   workflow_dispatch:
 
+# =============================================================================
+# JOB 1 : Build + Push Docker image
+# =============================================================================
+
 jobs:
+
   docker:
     name: build-and-push-ghcr
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 30
 
     permissions:
       contents: read
       packages: write
 
+    # =============================================================================
+    # Variables d'environnement utilisées pendant les tests CI/CD
+    # =============================================================================
+
     env:
       ASSETS_SOURCE: huggingface
+
       HF_REPO_ID: SteGONZALEZ/pret-a-depenser-artifacts
       HF_ASSETS_REPO_ID: SteGONZALEZ/pret-a-depenser-artifacts
       HF_REPO_TYPE: dataset
+
       DATABASE_URL: sqlite:///./test_credit_api.db
+
       MODEL_BACKEND: onnx
+
       API_KEY: test_api_key
+
       BENCHMARK_MODE: "true"
 
     steps:
+
+      # =============================================================================
+      # Récupération du repo GitHub
+      # =============================================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # =============================================================================
+      # Installation Python
+      # =============================================================================
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # =============================================================================
+      # Installation UV
+      # =============================================================================
+
       - name: Install uv
         run: python -m pip install --upgrade pip uv
+
+      # =============================================================================
+      # Installation des dépendances
+      # =============================================================================
 
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
+      # =============================================================================
+      # DEBUG VARIABLES ENVIRONNEMENT
+      # =============================================================================
+
+      - name: Debug environment
+        run: |
+          echo "ASSETS_SOURCE=$ASSETS_SOURCE"
+          echo "HF_REPO_ID=$HF_REPO_ID"
+          echo "HF_REPO_TYPE=$HF_REPO_TYPE"
+
+      # =============================================================================
+      # TESTS PYTEST
+      # =============================================================================
+
       - name: Run tests before publish
         run: uv run pytest -v
+
+      # =============================================================================
+      # Docker Buildx
+      # =============================================================================
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # =============================================================================
+      # Login GitHub Container Registry
+      # =============================================================================
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # =============================================================================
+      # Génération des tags Docker
+      # =============================================================================
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/credit-scoring-api
+
+          tags: |
+            type=raw,value=latest
+            type=sha
+            type=ref,event=branch
+            type=ref,event=pr
+
+      # =============================================================================
+      # Build + Push Docker image
+      # =============================================================================
+
+      - name: Build and push Docker image to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+
+          push: true
+
+          tags: ${{ steps.meta.outputs.tags }}
+
+          labels: ${{ steps.meta.outputs.labels }}
+
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+# =============================================================================
+# JOB 2 : Déploiement Hugging Face
+# =============================================================================
+
+  deploy-huggingface:
+
+    name: deploy-to-huggingface-space
+
+    runs-on: ubuntu-latest
+
+    # Ce job attend la réussite du job docker
+    needs: docker
+
+    timeout-minutes: 20
+
+    steps:
+
+      # =============================================================================
+      # Checkout GitHub
+      # =============================================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # =============================================================================
+      # Configuration Git
+      # =============================================================================
+
+      - name: Configure Git
+        run: |
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name "github-actions"
+
+      # =============================================================================
+      # Clone du Space Hugging Face
+      # =============================================================================
+
+      - name: Clone Hugging Face Space
+
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+        run: |
+          git clone https://SteGONZALEZ:${HF_TOKEN}@huggingface.co/spaces/SteGONZALEZ/pret_a_depenser hf-space
+
+      # =============================================================================
+      # Copie des fichiers vers le Space
+      # =============================================================================
+
+      - name: Prepare files for Hugging Face
+
+        run: |
+          rsync -av \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude ".venv" \
+            --exclude "__pycache__" \
+            --exclude ".pytest_cache" \
+            --exclude ".mypy_cache" \
+            --exclude ".ruff_cache" \
+            --exclude "mlflow_backend" \
+            --exclude "mlflow_artifacts" \
+            --exclude "notebook" \
+            --exclude "tests" \
+            --exclude "logs" \
+            --exclude "submissions" \
+            --exclude "docs/images" \
+            --exclude "*.png" \
+            --exclude "*.jpg" \
+            --exclude "*.jpeg" \
+            --exclude "*.pyc" \
+            ./ hf-space/
+
+      # =============================================================================
+      # README Hugging Face
+      # =============================================================================
+
+      - name: Ensure Hugging Face README metadata
+
+        run: |
+          cat > hf-space/README.md <<'EOF'
+          ---
+          title: Pret A Depenser API
+          emoji: 🧠
+          colorFrom: green
+          colorTo: blue
+          sdk: docker
+          app_port: 7860
+          ---
+
+          # API FastAPI de scoring crédit
+          EOF
+
+      # =============================================================================
+      # Dockerfile spécifique Hugging Face
+      # =============================================================================
+
+      - name: Ensure Hugging Face Dockerfile
+
+        run: |
+          cat > hf-space/Dockerfile <<'EOF'
+
+          FROM python:3.12-slim
+
+          ENV PYTHONDONTWRITEBYTECODE=1
+          ENV PYTHONUNBUFFERED=1
+
+          WORKDIR /app
+
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              build-essential \
+              git \
+              && rm -rf /var/lib/apt/lists/*
+
+          COPY pyproject.toml uv.lock ./
+
+          RUN pip install --no-cache-dir uv
+          RUN uv sync --frozen --no-dev
+
+          COPY . .
+
+          EXPOSE 7860
+
+          CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
+
+          EOF
+
+      # =============================================================================
+      # Push vers Hugging Face
+      # =============================================================================
+
+      - name: Push to Hugging Face Space
+
+        run: |
+          cd hf-space
+
+          git add .
+
+          git commit -m "Deploy from GitHub Actions" || echo "No changes to deploy"
+
+          git push
