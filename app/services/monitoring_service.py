@@ -345,6 +345,39 @@ class MonitoringService:
             computed_at=_utc_now(),
         )
 
+        if drift_detected:
+            severity = "medium"
+
+            if threshold_value is not None and threshold_value > 0:
+                ratio = metric_value / threshold_value
+
+                if ratio >= 2:
+                    severity = "high"
+                elif ratio >= 1.25:
+                    severity = "medium"
+                else:
+                    severity = "low"
+
+            self.create_alert(
+                alert_type="data_drift",
+                severity=severity,
+                title=f"Drift détecté sur {feature_name}",
+                message=(
+                    f"Une dérive a été détectée sur la métrique {metric_name} "
+                    f"pour la feature {feature_name}."
+                ),
+                model_name=model_name,
+                model_version=model_version,
+                feature_name=feature_name,
+                context={
+                    "metric_name": metric_name,
+                    "metric_value": metric_value,
+                    "threshold_value": threshold_value,
+                    "drift_detected": drift_detected,
+                },
+                status="open",
+            )
+            
         payload = {
             "id": entity.id,
             "model_name": entity.model_name,
