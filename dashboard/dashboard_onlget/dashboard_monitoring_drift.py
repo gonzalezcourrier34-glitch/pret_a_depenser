@@ -698,7 +698,7 @@ def _render_per_feature_charts(
 
                 st.bar_chart(top_latest_feature_scores)
 
-    st.markdown("##### Évolution du score moyen de drift feature-level")
+    st.markdown("##### Évolution moyenne des métriques de drift feature-level")
 
     if "computed_at" in per_feature_df.columns and "metric_value" in per_feature_df.columns:
         mean_drift_timeline_df = (
