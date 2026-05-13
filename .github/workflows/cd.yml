@@ -5,53 +5,128 @@ on:
     branches: ["main", "master"]
   workflow_dispatch:
 
+# ============================================================================
+# Pipeline CI/CD du projet "Prêt à Dépenser"
+#
+# Objectif :
+# - lancer les tests automatiquement
+# - construire l'image Docker
+# - publier l'image sur GitHub Container Registry
+# - déployer automatiquement sur Hugging Face Spaces
+#
+# Ce pipeline permet d'automatiser complètement le cycle de déploiement.
+# ============================================================================
+
 jobs:
+
+  # ==========================================================================
+  # JOB 1 : BUILD + TEST + PUSH DOCKER
+  # ==========================================================================
+
   docker:
     name: build-and-push-ghcr
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # Permissions nécessaires pour pousser une image Docker sur GHCR
     permissions:
       contents: read
       packages: write
 
+    # Variables d'environnement utilisées durant le pipeline
     env:
       ASSETS_SOURCE: huggingface
       HF_REPO_ID: SteGONZALEZ/pret-a-depenser-artifacts
       HF_ASSETS_REPO_ID: SteGONZALEZ/pret-a-depenser-artifacts
       HF_REPO_TYPE: dataset
+
+      # Base SQLite utilisée uniquement pour les tests CI
       DATABASE_URL: sqlite:///./test_credit_api.db
+
+      # Backend d'inférence utilisé pendant les tests
       MODEL_BACKEND: onnx
+
+      # Clé API de test
       API_KEY: test_api_key
+
+      # Active le mode benchmark
       BENCHMARK_MODE: "true"
 
     steps:
+
+      # ----------------------------------------------------------------------
+      # Récupération du dépôt GitHub
+      # ----------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ----------------------------------------------------------------------
+      # Installation de Python 3.12
+      # ----------------------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # ----------------------------------------------------------------------
+      # Installation du gestionnaire de dépendances "uv"
+      # ----------------------------------------------------------------------
       - name: Install uv
         run: python -m pip install --upgrade pip uv
 
+      # ----------------------------------------------------------------------
+      # Installation des dépendances du projet
+      #
+      # --all-extras :
+      # installe les dépendances optionnelles
+      #
+      # --dev :
+      # installe aussi les dépendances de développement
+      # comme pytest, ruff, etc.
+      # ----------------------------------------------------------------------
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
+      # ----------------------------------------------------------------------
+      # Vérification des variables d'environnement
+      #
+      # Permet de vérifier rapidement dans les logs CI
+      # que les variables importantes sont bien présentes.
+      # ----------------------------------------------------------------------
       - name: Debug environment
         run: |
           echo "ASSETS_SOURCE=$ASSETS_SOURCE"
           echo "HF_REPO_ID=$HF_REPO_ID"
           echo "HF_REPO_TYPE=$HF_REPO_TYPE"
 
+      # ----------------------------------------------------------------------
+      # Lancement des tests automatisés
+      #
+      # Si un test échoue :
+      # -> le pipeline s'arrête
+      # -> l'image Docker ne sera PAS publiée
+      #
+      # Cela sécurise le déploiement.
+      # ----------------------------------------------------------------------
       - name: Run tests before publish
         run: uv run pytest -v
 
+      # ----------------------------------------------------------------------
+      # Préparation du moteur Docker Buildx
+      #
+      # Buildx améliore :
+      # - les performances de build
+      # - le cache Docker
+      # - la compatibilité multi-plateformes
+      # ----------------------------------------------------------------------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # ----------------------------------------------------------------------
+      # Connexion à GitHub Container Registry (GHCR)
+      #
+      # GHCR sert à stocker l'image Docker du projet.
+      # ----------------------------------------------------------------------
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -59,6 +134,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # ----------------------------------------------------------------------
+      # Génération automatique des tags Docker
+      #
+      # Exemples :
+      # - latest
+      # - hash du commit
+      # - nom de branche
+      # ----------------------------------------------------------------------
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -70,6 +153,12 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
 
+      # ----------------------------------------------------------------------
+      # Construction + publication de l'image Docker
+      #
+      # cache-from / cache-to :
+      # permettent d'accélérer les builds suivants.
+      # ----------------------------------------------------------------------
       - name: Build and push Docker image to GHCR
         uses: docker/build-push-action@v6
         with:
@@ -80,27 +169,63 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # ==========================================================================
+  # JOB 2 : DEPLOIEMENT SUR HUGGING FACE SPACES
+  # ==========================================================================
+
   deploy-huggingface:
     name: deploy-to-huggingface-space
     runs-on: ubuntu-latest
+
+    # Ce job démarre uniquement si le job Docker a réussi
     needs: docker
+
     timeout-minutes: 20
 
     steps:
+
+      # ----------------------------------------------------------------------
+      # Récupération du dépôt GitHub
+      # ----------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ----------------------------------------------------------------------
+      # Configuration Git
+      #
+      # Nécessaire pour pouvoir push automatiquement
+      # vers Hugging Face.
+      # ----------------------------------------------------------------------
       - name: Configure Git
         run: |
           git config --global user.email "github-actions@github.com"
           git config --global user.name "github-actions"
 
+      # ----------------------------------------------------------------------
+      # Clonage du Space Hugging Face
+      #
+      # Le token HF est stocké dans les secrets GitHub.
+      # ----------------------------------------------------------------------
       - name: Clone Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           git clone https://user:${HF_TOKEN}@huggingface.co/spaces/SteGONZALEZ/pret_a_depenser hf-space
 
+      # ----------------------------------------------------------------------
+      # Copie des fichiers utiles vers le Space
+      #
+      # Beaucoup de fichiers sont exclus :
+      # - datasets lourds
+      # - cache Python
+      # - images
+      # - artefacts de monitoring
+      # - notebooks
+      #
+      # Objectif :
+      # réduire la taille du déploiement
+      # et éviter les erreurs HF sur les gros fichiers.
+      # ----------------------------------------------------------------------
       - name: Prepare files for Hugging Face
         run: |
           rsync -av \
@@ -130,6 +255,11 @@ jobs:
             --exclude "*.pyc" \
             ./ hf-space/
 
+      # ----------------------------------------------------------------------
+      # Création automatique du README Hugging Face
+      #
+      # Les métadonnées YAML sont obligatoires pour HF Spaces.
+      # ----------------------------------------------------------------------
       - name: Ensure Hugging Face README metadata
         run: |
           printf '%s\n' \
@@ -145,6 +275,12 @@ jobs:
             '# API FastAPI de scoring crédit' \
             > hf-space/README.md
 
+      # ----------------------------------------------------------------------
+      # Génération automatique du Dockerfile Hugging Face
+      #
+      # Le Space démarre directement l'API FastAPI
+      # via Uvicorn.
+      # ----------------------------------------------------------------------
       - name: Ensure Hugging Face Dockerfile
         run: |
           printf '%s\n' \
@@ -172,12 +308,22 @@ jobs:
             'CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]' \
             > hf-space/Dockerfile
 
+      # ----------------------------------------------------------------------
+      # Push automatique du projet vers Hugging Face
+      #
+      # Si aucun changement n'est détecté :
+      # le pipeline continue sans erreur.
+      # ----------------------------------------------------------------------
       - name: Push to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd hf-space
+
           git remote set-url origin https://user:${HF_TOKEN}@huggingface.co/spaces/SteGONZALEZ/pret_a_depenser
+
           git add .
+
           git commit -m "Deploy from GitHub Actions" || echo "No changes to deploy"
+
           git push

@@ -1,61 +1,109 @@
 services:
+
+  # ==========================================================================
+  # SERVICE 1 : BASE DE DONNÉES POSTGRESQL
+  # ==========================================================================
+
   postgres:
     image: postgres:16
     container_name: postgres_credit_api
     restart: always
+
+    # Chargement des variables depuis le fichier .env
     env_file:
       - .env
+
+    # Configuration de la base PostgreSQL
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: credit_api
+
+    # Exposition du port PostgreSQL
+    # Local : 5432
+    # Container : 5432
     ports:
       - "5432:5432"
+
+    # Volume persistant pour conserver les données
+    # même si le container est supprimé/recréé
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
+    # Vérification de santé de PostgreSQL
+    # L’API ne démarre que lorsque la base est prête
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d credit_api"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+
+  # ==========================================================================
+  # SERVICE 2 : API FASTAPI DE SCORING CRÉDIT
+  # ==========================================================================
+
   api:
     build: .
     container_name: fastapi_credit_api
     restart: always
+
+    # L'API dépend de PostgreSQL
+    # Elle attend que la base soit healthy avant de démarrer
     depends_on:
       postgres:
         condition: service_healthy
+
     env_file:
       - .env
+
     environment:
+      # Connexion interne Docker vers PostgreSQL
+      # Ici "postgres" correspond au nom du service Docker
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/credit_api
 
-      # Modèle
+      # ----------------------------------------------------------------------
+      # Configuration du modèle
+      # ----------------------------------------------------------------------
       MODEL_NAME: credit_scoring_model
       MODEL_VERSION: v1
+
+      # Backend utilisé pour l’inférence
+      # Peut être sklearn ou onnx selon le test souhaité
       MODEL_BACKEND: sklearn
+
+      # Chemins des artefacts modèle dans le container
       MODEL_PATH: /app/artifacts/model.joblib
       ONNX_MODEL_PATH: /app/artifacts/model.onnx
       THRESHOLD_PATH: /app/artifacts/threshold.json
 
-      # Données
+      # ----------------------------------------------------------------------
+      # Données utilisées par l'API
+      # ----------------------------------------------------------------------
       APPLICATION_CSV: /app/data/application_train.csv
       SIMULATION_SOURCE_CSV: /app/data/application_test.csv
       DATA_PATH: /app/data
 
+      # ----------------------------------------------------------------------
       # Monitoring
+      # ----------------------------------------------------------------------
       MONITORING_DIR: /app/artifacts/monitoring
 
-      # Hugging Face
+      # ----------------------------------------------------------------------
+      # Téléchargement des artefacts depuis Hugging Face
+      # ----------------------------------------------------------------------
       DOWNLOAD_ASSETS_FROM_HF: "true"
       HF_REPO_ID: ${HF_REPO_ID}
       HF_REPO_TYPE: ${HF_REPO_TYPE:-dataset}
       HF_TOKEN: ${HF_TOKEN}
 
-      # Python
+      # ----------------------------------------------------------------------
+      # Python path
+      # Permet à Python de retrouver correctement les modules du projet
+      # ----------------------------------------------------------------------
       PYTHONPATH: /app
 
+    # Commande de démarrage de l’API
     command:
       [
         "uv", "run", "uvicorn",
@@ -64,14 +112,22 @@ services:
         "--port", "8000"
       ]
 
+    # Exposition de l’API
+    # Local : 8000
+    # Container : 8000
     ports:
       - "8000:8000"
 
+    # Volumes montés pour le développement local
+    # Cela permet de modifier app/, data/ ou artifacts/
+    # sans reconstruire toute l'image à chaque fois
     volumes:
       - ./data:/app/data
       - ./artifacts:/app/artifacts
       - ./app:/app/app
 
+    # Healthcheck de l’API
+    # Vérifie que le endpoint /predict/health répond correctement
     healthcheck:
       test:
         [
@@ -83,36 +139,64 @@ services:
       retries: 10
       start_period: 20s
 
+
+  # ==========================================================================
+  # SERVICE 3 : DASHBOARD STREAMLIT
+  # ==========================================================================
+
   dashboard:
     build: .
     container_name: streamlit_credit_dashboard
     restart: always
+
+    # Le dashboard dépend :
+    # - de PostgreSQL
+    # - de l'API FastAPI
+    #
+    # Il démarre seulement quand les deux services sont prêts.
     depends_on:
       postgres:
         condition: service_healthy
       api:
         condition: service_healthy
+
     env_file:
       - .env
+
     environment:
+      # Connexion interne à PostgreSQL
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/credit_api
 
-      # Dashboard vers API Docker interne
+      # ----------------------------------------------------------------------
+      # Connexion du dashboard vers l’API
+      # ----------------------------------------------------------------------
+
+      # Dans Docker Compose, le dashboard appelle l'API via le nom du service
+      # et non via localhost.
       API_URL: http://api:8000
+
+      # Clé API utilisée par le dashboard pour appeler l’API
       API_KEY: ${API_KEY}
+
+      # Nombre de lignes affichées par défaut dans les vues
       DEFAULT_LIMIT: 200
 
-      # Contexte modèle affiché côté dashboard
+      # ----------------------------------------------------------------------
+      # Informations modèle affichées côté dashboard
+      # ----------------------------------------------------------------------
       MODEL_NAME: credit_scoring_model
       MODEL_VERSION: v1
 
-      # Données locales partagées
+      # ----------------------------------------------------------------------
+      # Données et monitoring partagés
+      # ----------------------------------------------------------------------
       DATA_PATH: /app/data
       MONITORING_DIR: /app/artifacts/monitoring
 
-      # Python
+      # Python path
       PYTHONPATH: /app
 
+    # Commande de démarrage du dashboard Streamlit
     command:
       [
         "uv", "run", "streamlit", "run",
@@ -121,14 +205,32 @@ services:
         "--server.port=8501"
       ]
 
+    # Exposition du dashboard
+    # Local : 8501
+    # Container : 8501
     ports:
       - "8501:8501"
 
+    # Volumes partagés avec le container dashboard
+    # Le dashboard peut lire :
+    # - le code dashboard
+    # - les artefacts
+    # - les services app
+    # - les données locales
     volumes:
       - ./dashboard:/app/dashboard
       - ./artifacts:/app/artifacts
       - ./app:/app/app
       - ./data:/app/data
 
+
+# ============================================================================
+# VOLUMES DOCKER
+# ============================================================================
+
 volumes:
+
+  # Volume persistant PostgreSQL
+  # Il évite de perdre les tables et les logs de prédiction
+  # à chaque redémarrage des containers.
   postgres_data:

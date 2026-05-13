@@ -1,32 +1,98 @@
 """
 Profiling d'inférence via l'API FastAPI.
 
-Objectif
---------
-Ce script permet d'analyser le temps passé dans les différentes fonctions
-lors d'appels répétés au endpoint :
+Description
+-----------
+Ce script permet d'analyser précisément où le temps est consommé
+lors de plusieurs appels au endpoint :
 
 POST /predict
 
-Contrairement à un simple benchmark qui mesure uniquement la latence globale,
-le profiling permet d'identifier quelles parties du script consomment le plus
-de temps côté client.
+Contrairement au benchmark, qui mesure surtout une latence globale,
+le profiling descend plus finement dans l'exécution Python.
 
-Important
----------
-Ce script envoie à l'API les features d'entrée attendues par /predict.
+Il permet d’identifier :
+- les fonctions les plus coûteuses
+- le temps passé dans les appels HTTP
+- le temps passé dans requests / urllib3
+- les éventuels surcoûts côté client
+- les parties du script à optimiser en priorité
 
-Il ne reconstruit pas lui-même les features selon le backend utilisé.
-C'est l'API qui choisit le moteur d'inférence via la variable MODEL_BACKEND :
+Différence entre benchmark et profiling
+---------------------------------------
+Benchmark :
+    mesure combien de temps prend une requête complète.
 
-- sklearn
-- onnx
+Profiling :
+    explique où ce temps est consommé.
 
-Le but est donc de tester le comportement réel de l'API, dans des conditions
-proches d'un appel de production.
+Dans mon projet, cela permet de distinguer :
+- la latence globale observée
+- le coût du client Python
+- le coût réseau
+- le coût de sérialisation JSON
+- le temps réellement passé côté API
+
+Endpoint testé
+--------------
+POST /predict
+
+Ce endpoint reçoit directement les features du client sous forme JSON.
+
+Contrairement au endpoint optimisé GET /predict/{client_id},
+ici le client envoie toutes les variables d'entrée attendues par le modèle.
+
+Cela permet de tester un cas plus complet :
+- préparation du payload JSON
+- envoi des features
+- traitement API
+- prédiction
+- réponse JSON
+
+Rôle de cProfile
+----------------
+cProfile est l’outil standard de Python pour profiler un programme.
+
+Il mesure notamment :
+- le nombre d'appels par fonction
+- le temps passé dans chaque fonction
+- le temps cumulé incluant les sous-fonctions
+
+Le tri par temps cumulé est particulièrement utile, car il montre
+les fonctions responsables du plus gros temps total d'exécution.
 """
 
 from __future__ import annotations
+
+# =============================================================================
+# IMPORTS
+# =============================================================================
+
+"""
+Les imports sont séparés par rôle afin de rendre le script plus lisible.
+
+cProfile et pstats :
+    outils Python utilisés pour mesurer et afficher le profiling.
+
+math :
+    utilisé pour détecter les valeurs NaN ou infinies.
+
+Path :
+    utilisé pour gérer les chemins de fichiers proprement.
+
+Any :
+    utilisé pour typer les dictionnaires de features.
+
+numpy / pandas :
+    utilisés pour manipuler les données et convertir les types.
+
+requests :
+    utilisé pour appeler l'API FastAPI.
+
+Configuration projet :
+    permet de récupérer l'URL de l'API, la clé API,
+    le backend modèle et le dossier de monitoring.
+"""
 
 # Outils de profiling Python
 import cProfile
@@ -53,54 +119,86 @@ from app.services.loader_services.data_loading_service import (
 
 
 # =============================================================================
-# Configuration des fichiers de sortie
+# CONFIGURATION DES FICHIERS DE SORTIE
 # =============================================================================
 
-# Dossier dans lequel le rapport de profiling sera enregistré
+"""
+Le rapport de profiling est sauvegardé dans :
+
+artifacts/performance/profiling_report.txt
+
+Ce choix permet de centraliser les résultats de performance
+avec les autres artefacts du projet.
+
+Ce fichier peut ensuite être :
+- consulté manuellement
+- intégré dans un rapport
+- comparé entre plusieurs versions
+- utilisé pour justifier une optimisation
+"""
+
+# Dossier dans lequel le rapport sera enregistré
 OUTPUT_DIR = Path("artifacts/performance")
 
-# Création du dossier s'il n'existe pas encore
+# Création du dossier si nécessaire
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Fichier texte contenant le rapport cProfile
+# Fichier texte final du rapport cProfile
 OUTPUT_FILE = OUTPUT_DIR / "profiling_report.txt"
 
 
 # =============================================================================
-# Nettoyage des valeurs pour compatibilité JSON
+# NETTOYAGE DES VALEURS POUR COMPATIBILITÉ JSON
 # =============================================================================
 
 def make_json_safe(value: Any) -> Any:
     """
     Convertit une valeur pandas / numpy en valeur compatible JSON.
 
-    Pourquoi cette fonction ?
-    ------------------------
-    Lorsqu'on récupère une ligne depuis un DataFrame pandas, certaines valeurs
-    peuvent poser problème lors de l'envoi en JSON :
+    Objectif
+    --------
+    FastAPI reçoit les données au format JSON.
+    Or certaines valeurs issues de pandas ou numpy ne sont pas toujours
+    directement sérialisables.
 
+    Problèmes possibles
+    -------------------
+    Une ligne de DataFrame peut contenir :
+    - np.int64
+    - np.float32
     - NaN
     - inf
     - -inf
-    - types numpy comme np.int64 ou np.float32
+    - valeurs manquantes pandas
 
-    Or, une API FastAPI attend généralement un JSON propre.
-    Cette fonction convertit donc les valeurs problématiques avant l'appel API.
+    Ces valeurs peuvent provoquer une erreur lors de l'envoi à l'API.
+
+    Stratégie
+    ---------
+    - les entiers numpy sont convertis en int Python
+    - les flottants numpy sont convertis en float Python
+    - les NaN et inf sont remplacés par None
+    - les valeurs manquantes pandas sont remplacées par None
+
+    Retour
+    ------
+    Any
+        Valeur nettoyée, compatible avec un payload JSON.
     """
 
     # Valeur déjà vide
     if value is None:
         return None
 
-    # Conversion des entiers numpy en int Python classique
+    # Conversion np.int64, np.int32, etc.
     if isinstance(value, np.integer):
         return int(value)
 
-    # Conversion des flottants numpy en float Python classique
+    # Conversion np.float32, np.float64, etc.
     if isinstance(value, np.floating):
         value = float(value)
 
-    # Gestion des float non valides pour JSON
+    # Gestion des flottants invalides en JSON
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):
             return None
@@ -115,10 +213,32 @@ def make_json_safe(value: Any) -> Any:
 
 def clean_features_for_json(features: dict[str, Any]) -> dict[str, Any]:
     """
-    Nettoie un dictionnaire de features avant envoi à l'API.
+    Nettoie un dictionnaire complet de features avant envoi à l'API.
 
-    Chaque clé est convertie en chaîne de caractères.
-    Chaque valeur est rendue compatible avec le format JSON.
+    Objectif
+    --------
+    Transformer une ligne de DataFrame en payload JSON propre.
+
+    Traitements appliqués
+    ---------------------
+    Pour chaque variable :
+    - la clé est convertie en str
+    - la valeur est convertie avec make_json_safe()
+
+    Pourquoi convertir les clés en str ?
+    ------------------------------------
+    En JSON, les clés d'un objet doivent être des chaînes de caractères.
+    Cette étape évite donc des problèmes de sérialisation.
+
+    Paramètres
+    ----------
+    features : dict[str, Any]
+        Dictionnaire brut issu d'une ligne pandas.
+
+    Retour
+    ------
+    dict[str, Any]
+        Dictionnaire propre et compatible JSON.
     """
 
     return {
@@ -128,29 +248,51 @@ def clean_features_for_json(features: dict[str, Any]) -> dict[str, Any]:
 
 
 # =============================================================================
-# Chargement des features attendues par l'API
+# CHARGEMENT DES FEATURES ATTENDUES PAR L'API
 # =============================================================================
 
 def load_features_for_api(row_index: int = 0) -> dict[str, Any]:
     """
-    Charge une ligne de features utilisable par le endpoint /predict.
+    Charge une ligne de features exploitable par le endpoint POST /predict.
 
-    Source utilisée
+    Source des données
+    ------------------
+    Les données proviennent du fichier de référence utilisé pour le monitoring.
+
+    Dans ce projet, ce fichier représente un jeu de features cohérent
+    avec ce que le modèle attend en entrée.
+
+    Pourquoi utiliser cette source ?
+    --------------------------------
+    Cela permet de tester l'API avec des données réalistes,
+    sans reconstruire manuellement toutes les features.
+
+    Étapes réalisées
     ----------------
-    Les données viennent de la référence brute de monitoring.
+    1. Initialisation du cache de monitoring.
+    2. Chargement du DataFrame de référence.
+    3. Vérification que le DataFrame n'est pas vide.
+    4. Sélection d'une ligne.
+    5. Suppression des colonnes non prédictives.
+    6. Conversion en dictionnaire compatible JSON.
 
-    Cette référence contient les variables d'entrée attendues par l'API.
-    Elle permet donc de tester le endpoint avec un exemple réaliste.
+    Colonnes supprimées
+    -------------------
+    TARGET :
+        variable cible connue uniquement pendant l'entraînement.
 
-    Paramètre
-    ---------
+    SK_ID_CURR :
+        identifiant client, non utilisé comme feature métier.
+
+    Paramètres
+    ----------
     row_index : int
-        Numéro de la ligne à utiliser dans le DataFrame de référence.
+        Index de la ligne à utiliser dans le DataFrame.
 
     Retour
     ------
-    dict
-        Dictionnaire de features nettoyé et prêt à être envoyé en JSON.
+    dict[str, Any]
+        Features nettoyées et prêtes à être envoyées à l'API.
     """
 
     # Initialisation du cache de référence monitoring
@@ -159,45 +301,67 @@ def load_features_for_api(row_index: int = 0) -> dict[str, Any]:
     # Chargement du DataFrame de référence brute
     df = get_reference_features_raw_df()
 
-    # Sécurité : on vérifie que la source n'est pas vide
+    # Sécurité : DataFrame vide
     if df.empty:
         raise ValueError("Le DataFrame reference_features_raw est vide.")
 
-    # Sécurité : on vérifie que l'index demandé existe
+    # Sécurité : index hors limites
     if row_index >= len(df):
         raise IndexError(
             f"row_index={row_index} est hors limites. "
             f"Nombre de lignes disponibles : {len(df)}"
         )
 
-    # Sélection d'une ligne client
+    # Sélection d'une ligne
     row = df.iloc[row_index].copy()
 
-    # Ces colonnes ne doivent pas être envoyées au modèle
-    # TARGET = vraie classe connue uniquement en entraînement
-    # SK_ID_CURR = identifiant client, pas une feature métier
+    # Suppression des colonnes non utilisées pour la prédiction
     row = row.drop(labels=["TARGET", "SK_ID_CURR"], errors="ignore")
 
-    # Conversion en dictionnaire JSON-safe
+    # Nettoyage JSON
     return clean_features_for_json(row.to_dict())
 
 
 # =============================================================================
-# Appel API simple
+# APPEL API SIMPLE
 # =============================================================================
 
 def call_predict(row_index: int = 0) -> dict[str, Any]:
     """
-    Appelle le endpoint POST /predict avec les features attendues.
+    Effectue un appel unique au endpoint POST /predict.
 
-    Cette fonction sert à effectuer un appel unique à l'API.
-    Elle est utile pour tester rapidement que l'API répond correctement.
+    Objectif
+    --------
+    Cette fonction permet de tester rapidement que :
+    - les features sont bien chargées
+    - le payload JSON est valide
+    - l'API répond correctement
+    - la prédiction est bien retournée
+
+    Elle est moins utilisée pour le profiling principal,
+    car run_profile() optimise le chargement des features
+    en les chargeant une seule fois.
+
+    Paramètres
+    ----------
+    row_index : int
+        Index de la ligne de features à envoyer.
+
+    Retour
+    ------
+    dict[str, Any]
+        Réponse JSON retournée par l'API.
+
+    Erreurs
+    -------
+    Si l'API renvoie un code HTTP >= 400,
+    une exception est levée avec le détail de l'erreur.
     """
 
-    # Chargement des features à envoyer
+    # Chargement des features
     features = load_features_for_api(row_index=row_index)
 
-    # Appel du endpoint FastAPI
+    # Appel POST /predict
     response = requests.post(
         f"{API_URL}/predict",
         headers={"X-API-Key": API_KEY},
@@ -215,34 +379,68 @@ def call_predict(row_index: int = 0) -> dict[str, Any]:
 
 
 # =============================================================================
-# Fonction exécutée pendant le profiling
+# FONCTION PROFILÉE
 # =============================================================================
 
 def run_profile(n_runs: int = 100) -> None:
     """
-    Lance plusieurs appels au endpoint /predict.
+    Lance plusieurs appels API pour produire un rapport de profiling.
 
     Objectif
     --------
-    Cette fonction est celle qui sera profilée par cProfile.
+    Cette fonction est la partie réellement analysée par cProfile.
 
-    Elle répète plusieurs appels API afin d'obtenir un rapport plus stable
-    qu'avec un seul appel.
+    Elle simule plusieurs appels successifs au endpoint :
 
-    Remarque importante
-    -------------------
-    Les features sont chargées une seule fois avant la boucle.
-    Cela permet de profiler principalement les appels API, et non le chargement
-    des données à chaque itération.
+    POST /predict
+
+    Pourquoi charger les features une seule fois ?
+    ----------------------------------------------
+    Le but ici est de profiler l'appel API,
+    pas le chargement des données depuis le disque.
+
+    Si les features étaient rechargées à chaque itération,
+    le rapport serait pollué par :
+    - la lecture de fichiers
+    - la création de DataFrame
+    - les conversions pandas
+
+    En chargeant les features une seule fois,
+    on concentre l'analyse sur :
+    - requests
+    - HTTP
+    - sérialisation JSON
+    - réponse API
+
+    Pourquoi utiliser requests.Session ?
+    ------------------------------------
+    Une session HTTP persistante permet de réutiliser la connexion réseau.
+
+    Cela évite :
+    - d'ouvrir une nouvelle connexion à chaque requête
+    - de gonfler artificiellement la latence
+    - de mesurer un scénario moins réaliste
+
+    Paramètres
+    ----------
+    n_runs : int
+        Nombre d'appels API à exécuter pendant le profiling.
+
+    Retour
+    ------
+    None
+        La fonction ne retourne rien.
+        Le résultat est capturé par cProfile.
     """
 
-    # Chargement unique des features pour ne pas fausser le profiling
+    # Chargement unique des features
     features = load_features_for_api(row_index=0)
 
-    # Session HTTP persistante pour réutiliser la connexion
+    # Session persistante pour réutiliser la connexion HTTP
     with requests.Session() as session:
 
         for _ in range(n_runs):
+
             response = session.post(
                 f"{API_URL}/predict",
                 headers={"X-API-Key": API_KEY},
@@ -250,52 +448,90 @@ def run_profile(n_runs: int = 100) -> None:
                 timeout=30,
             )
 
-            # Si une requête échoue, on arrête le profiling
+            # Arrêt immédiat si une requête échoue
             if response.status_code >= 400:
                 raise RuntimeError(f"{response.status_code} - {response.text}")
 
 
 # =============================================================================
-# Point d'entrée du script
+# POINT D'ENTRÉE DU SCRIPT
 # =============================================================================
 
 if __name__ == "__main__":
+
     """
     Point d'entrée du script.
 
-    Lancement typique :
-    python scripts/nom_du_script.py
+    Commande typique
+    ----------------
+    python scripts/profiling_inference.py
 
-    Le script :
-    1. affiche la configuration utilisée,
-    2. active le profiler,
-    3. lance 100 appels API,
-    4. désactive le profiler,
-    5. sauvegarde le rapport dans artifacts/performance.
+    Déroulé
+    -------
+    1. Affichage de la configuration utilisée.
+    2. Création du profiler cProfile.
+    3. Activation du profiler.
+    4. Exécution de run_profile().
+    5. Désactivation du profiler.
+    6. Sauvegarde du rapport texte.
+
+    Rapport généré
+    ---------------
+    Le rapport est sauvegardé dans :
+
+    artifacts/performance/profiling_report.txt
+
+    Lecture du rapport
+    ------------------
+    Les colonnes importantes sont :
+
+    ncalls :
+        nombre d'appels de la fonction.
+
+    tottime :
+        temps passé uniquement dans cette fonction.
+
+    percall :
+        temps moyen par appel.
+
+    cumtime :
+        temps cumulé incluant les sous-fonctions.
+
+    filename:lineno(function) :
+        emplacement de la fonction appelée.
+
+    Pourquoi trier par cumulative ?
+    -------------------------------
+    Le temps cumulé permet d’identifier les fonctions
+    qui pèsent le plus dans l'exécution globale.
+
+    C’est souvent plus utile que le temps direct,
+    car certaines fonctions délèguent beaucoup de travail
+    à d'autres fonctions internes.
     """
 
     print(f"API_URL       : {API_URL}")
     print(f"MODEL_BACKEND : {MODEL_BACKEND}")
     print(f"Profiling vers: {OUTPUT_FILE.resolve()}")
 
-    # Création du profiler Python
+    # Création du profiler
     profiler = cProfile.Profile()
 
-    # Début de la mesure
+    # Activation du profiler
     profiler.enable()
 
-    # Code réellement profilé
+    # Exécution du code à analyser
     run_profile(n_runs=100)
 
-    # Fin de la mesure
+    # Désactivation du profiler
     profiler.disable()
 
-    # Sauvegarde du rapport de profiling
+    # Sauvegarde du rapport
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+
         stats = pstats.Stats(profiler, stream=f)
 
-        # Tri par temps cumulé :
-        # on voit les fonctions qui consomment le plus de temps au total
+        # Tri par temps cumulé
         stats.sort_stats("cumulative")
 
         # Affichage des 40 fonctions les plus coûteuses

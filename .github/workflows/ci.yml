@@ -7,42 +7,114 @@ on:
     branches: ["main", "dev", "master"]
   workflow_dispatch:
 
+# ============================================================================
+# Pipeline CI du projet "Prêt à Dépenser"
+#
+# Objectif :
+# - vérifier que le code fonctionne
+# - installer l'environnement Python
+# - lancer les tests automatisés
+# - vérifier que l'image Docker peut être construite
+#
+# Contrairement au CD, ce workflow ne déploie pas.
+# Il sert surtout à contrôler la qualité avant fusion ou publication.
+# ============================================================================
+
 jobs:
+
+  # ==========================================================================
+  # JOB UNIQUE : TESTS + BUILD DOCKER
+  # ==========================================================================
+
   ci:
     name: tests-and-build
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    # Permission minimale :
+    # le workflow a seulement besoin de lire le dépôt.
     permissions:
       contents: read
 
+    # Variables utilisées pendant les tests
     env:
       ASSETS_SOURCE: huggingface
       HF_REPO_ID: SteGONZALEZ/pret-a-depenser-artifacts
       HF_ASSETS_REPO_ID: SteGONZALEZ/pret-a-depenser-artifacts
       HF_REPO_TYPE: dataset
+
+      # Base SQLite utilisée pour les tests CI
+      # Cela évite de dépendre d'une base PostgreSQL externe.
       DATABASE_URL: sqlite:///./test_credit_api.db
+
+      # Backend utilisé pour tester l'inférence optimisée
       MODEL_BACKEND: onnx
+
+      # Clé API fictive utilisée uniquement pour les tests
       API_KEY: test_api_key
+
+      # Mode benchmark activé pour les tests de performance/latence
       BENCHMARK_MODE: "true"
 
     steps:
+
+      # ----------------------------------------------------------------------
+      # Récupération du code source depuis le dépôt GitHub
+      # ----------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ----------------------------------------------------------------------
+      # Installation de Python 3.12
+      #
+      # Le workflow recrée un environnement propre à chaque exécution.
+      # Cela permet de vérifier que le projet fonctionne hors de mon PC local.
+      # ----------------------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # ----------------------------------------------------------------------
+      # Installation de uv
+      #
+      # uv est utilisé comme gestionnaire de dépendances Python.
+      # Il permet d'installer rapidement l'environnement du projet.
+      # ----------------------------------------------------------------------
       - name: Install uv
         run: python -m pip install --upgrade pip uv
 
+      # ----------------------------------------------------------------------
+      # Installation des dépendances du projet
+      #
+      # --locked :
+      # force l'utilisation du fichier uv.lock pour garantir
+      # des versions reproductibles.
+      #
+      # --all-extras :
+      # installe aussi les dépendances optionnelles.
+      #
+      # --dev :
+      # installe les dépendances de développement comme pytest.
+      # ----------------------------------------------------------------------
       - name: Install dependencies
         run: uv sync --locked --all-extras --dev
 
+      # ----------------------------------------------------------------------
+      # Exécution des tests automatisés
+      #
+      # Si un test échoue, le workflow s'arrête.
+      # Cela évite de valider une version cassée du projet.
+      # ----------------------------------------------------------------------
       - name: Run tests
         run: uv run pytest -v
 
+      # ----------------------------------------------------------------------
+      # Construction de l'image Docker
+      #
+      # Cette étape ne publie pas l'image.
+      # Elle vérifie seulement que le Dockerfile est valide
+      # et que l'application peut être empaquetée correctement.
+      # ----------------------------------------------------------------------
       - name: Build Docker image
         run: docker build -t credit-scoring-api:test .
